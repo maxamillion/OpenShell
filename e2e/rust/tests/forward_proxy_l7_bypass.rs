@@ -19,6 +19,14 @@ use tokio::time::{interval, timeout};
 
 const TEST_SERVER_IMAGE: &str = "public.ecr.aws/docker/library/python:3.13-alpine";
 
+/// Return the container runtime binary name ("podman" or "docker").
+fn container_runtime_binary() -> &'static str {
+    static RUNTIME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        std::env::var("OPENSHELL_CONTAINER_RUNTIME").unwrap_or_else(|_| "docker".to_string())
+    })
+}
+
 struct DockerServer {
     port: u16,
     container_id: String,
@@ -44,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
 HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
 "#;
 
-        let output = Command::new("docker")
+        let output = Command::new(container_runtime_binary())
             .args([
                 "run",
                 "--detach",
@@ -57,14 +65,15 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
                 script,
             ])
             .output()
-            .map_err(|e| format!("start docker test server: {e}"))?;
+            .map_err(|e| format!("start container test server: {e}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
             return Err(format!(
-                "docker run failed (exit {:?}):\n{stderr}",
+                "{} run failed (exit {:?}):\n{stderr}",
+                container_runtime_binary(),
                 output.status.code()
             ));
         }
@@ -83,7 +92,7 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
             let mut tick = interval(Duration::from_millis(500));
             loop {
                 tick.tick().await;
-                let output = Command::new("docker")
+                let output = Command::new(container_runtime_binary())
                     .args([
                         "exec",
                         &container_id,
@@ -99,13 +108,13 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
             }
         })
         .await
-        .map_err(|_| "docker test server did not become ready within 60s".to_string())
+        .map_err(|_| "container test server did not become ready within 60s".to_string())
     }
 }
 
 impl Drop for DockerServer {
     fn drop(&mut self) {
-        let _ = Command::new("docker")
+        let _ = Command::new(container_runtime_binary())
             .args(["rm", "-f", &self.container_id])
             .output();
     }

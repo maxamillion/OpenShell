@@ -45,6 +45,15 @@ pub struct GatewayMetadata {
         alias = "cf_auth_url"
     )]
     pub edge_auth_url: Option<String>,
+
+    /// Container runtime used for this gateway ("docker" or "podman").
+    /// Defaults to "docker" for backward compatibility with existing metadata.
+    #[serde(default = "default_container_runtime")]
+    pub container_runtime: String,
+}
+
+fn default_container_runtime() -> String {
+    "docker".to_string()
 }
 
 impl GatewayMetadata {
@@ -135,13 +144,20 @@ pub fn create_gateway_metadata_with_host(
         auth_mode: None,
         edge_team_domain: None,
         edge_auth_url: None,
+        container_runtime: default_container_runtime(),
     }
 }
 
 pub fn local_gateway_host() -> Option<String> {
+    // Check DOCKER_HOST first, then CONTAINER_HOST (Podman).
     std::env::var("DOCKER_HOST")
         .ok()
         .and_then(|value| local_gateway_host_from_docker_host(&value))
+        .or_else(|| {
+            std::env::var("CONTAINER_HOST")
+                .ok()
+                .and_then(|value| local_gateway_host_from_docker_host(&value))
+        })
 }
 
 pub fn local_gateway_host_from_docker_host(docker_host: &str) -> Option<String> {
@@ -463,6 +479,7 @@ mod tests {
             auth_mode: None,
             edge_team_domain: None,
             edge_auth_url: None,
+            container_runtime: "podman".to_string(),
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: GatewayMetadata = serde_json::from_str(&json).unwrap();

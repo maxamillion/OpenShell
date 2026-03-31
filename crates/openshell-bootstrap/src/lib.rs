@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod build;
+pub mod container_runtime;
 pub mod edge_token;
 pub mod errors;
 pub mod image;
@@ -45,6 +46,7 @@ use crate::runtime::{
 };
 
 pub use crate::constants::container_name;
+pub use crate::container_runtime::{ContainerRuntime, detect_runtime};
 pub use crate::docker::{
     DockerPreflight, ExistingGatewayInfo, check_docker_available, create_ssh_docker_client,
 };
@@ -95,8 +97,8 @@ pub struct DeployOptions {
     /// Override the gateway host advertised in cluster metadata and passed to
     /// the server. When set, the metadata will use this host instead of
     /// `127.0.0.1` and the container will receive `SSH_GATEWAY_HOST`.
-    /// Needed whenever the client cannot reach the Docker host at 127.0.0.1
-    /// — CI containers, WSL, remote Docker hosts, etc.
+    /// Needed whenever the client cannot reach the container host at 127.0.0.1
+    /// — CI containers, WSL, remote hosts, etc.
     pub gateway_host: Option<String>,
     /// Disable TLS entirely — the server listens on plaintext HTTP.
     pub disable_tls: bool,
@@ -123,6 +125,8 @@ pub struct DeployOptions {
     /// When false, an existing gateway is left as-is and deployment is
     /// skipped (the caller is responsible for prompting the user first).
     pub recreate: bool,
+    /// Container runtime override. When `None`, auto-detected.
+    pub container_runtime: Option<ContainerRuntime>,
 }
 
 impl DeployOptions {
@@ -139,6 +143,7 @@ impl DeployOptions {
             registry_token: None,
             gpu: vec![],
             recreate: false,
+            container_runtime: None,
         }
     }
 
@@ -208,6 +213,13 @@ impl DeployOptions {
         self.recreate = recreate;
         self
     }
+
+    /// Set the container runtime (Docker or Podman).
+    #[must_use]
+    pub fn with_container_runtime(mut self, runtime: ContainerRuntime) -> Self {
+        self.container_runtime = Some(runtime);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +227,7 @@ pub struct GatewayHandle {
     name: String,
     metadata: GatewayMetadata,
     docker: Docker,
+    runtime: ContainerRuntime,
 }
 
 impl GatewayHandle {
@@ -226,6 +239,11 @@ impl GatewayHandle {
     /// Get the gateway endpoint URL.
     pub fn gateway_endpoint(&self) -> &str {
         &self.metadata.gateway_endpoint
+    }
+
+    /// Get the container runtime used for this gateway.
+    pub fn runtime(&self) -> ContainerRuntime {
+        self.runtime
     }
 
     pub async fn stop(&self) -> Result<()> {
@@ -273,6 +291,9 @@ where
     let gpu = options.gpu;
     let recreate = options.recreate;
 
+    // Resolve the container runtime (CLI override > env var > auto-detect).
+    let runtime = detect_runtime(options.container_runtime.as_ref().map(|r| r.binary_name()))?;
+
     // Wrap on_log in Arc<Mutex<>> so we can share it with pull_remote_image
     // which needs a 'static callback for the bollard streaming pull.
     let on_log = Arc::new(Mutex::new(on_log));
@@ -284,15 +305,15 @@ where
         }
     };
 
-    // Create Docker client based on deployment mode.
+    // Create container runtime client based on deployment mode.
     // For local deploys, run a preflight check to fail fast with actionable
-    // guidance when Docker is not installed, not running, or unreachable.
+    // guidance when the runtime is not installed, not running, or unreachable.
     let (target_docker, remote_opts) = if let Some(remote_opts) = &options.remote {
         let remote = create_ssh_docker_client(remote_opts).await?;
         (remote, Some(remote_opts.clone()))
     } else {
-        log("[status] Checking Docker".to_string());
-        let preflight = check_docker_available().await?;
+        log(format!("[status] Checking {}", runtime.display_name()));
+        let preflight = docker::check_runtime_available(runtime).await?;
         (preflight.docker, None)
     };
 
@@ -417,7 +438,7 @@ where
             details.join(", "),
             conflicts
                 .iter()
-                .map(|c| format!("  docker stop {}", c.container_name))
+                .map(|c| format!("  {} stop {}", runtime.binary_name(), c.container_name))
                 .collect::<Vec<_>>()
                 .join("\n"),
         ));
@@ -428,7 +449,7 @@ where
     // leaving an orphaned volume in a corrupted state that blocks retries.
     // See: https://github.com/NVIDIA/OpenShell/issues/463
     let deploy_result: Result<GatewayMetadata> = async {
-        let device_ids = resolve_gpu_device_ids(&gpu, cdi_supported);
+        let device_ids = resolve_gpu_device_ids(&gpu, cdi_supported, runtime);
         // ensure_container returns the actual host port — which may differ from
         // the requested `port` when reusing an existing container that was
         // originally created with a different port.
@@ -542,13 +563,14 @@ where
         }
 
         // Create and store gateway metadata.
-        let metadata = create_gateway_metadata_with_host(
+        let mut metadata = create_gateway_metadata_with_host(
             &name,
             remote_opts.as_ref(),
             port,
             ssh_gateway_host.as_deref(),
             disable_tls,
         );
+        metadata.container_runtime = runtime.binary_name().to_string();
         store_gateway_metadata(&name, &metadata)?;
 
         Ok(metadata)
@@ -560,6 +582,7 @@ where
             name,
             metadata,
             docker: target_docker,
+            runtime,
         }),
         Err(deploy_err) => {
             if resume {
@@ -576,7 +599,7 @@ where
                     );
                 }
             } else {
-                // Automatically clean up Docker resources (volume, container, network,
+                // Automatically clean up container resources (volume, container, network,
                 // image) so the environment is left in a retryable state.
                 tracing::info!("deploy failed, cleaning up gateway resources for '{name}'");
                 if let Err(cleanup_err) = destroy_gateway_resources(&target_docker, &name).await {
@@ -597,6 +620,7 @@ where
 /// For local gateways, pass `None` for remote options.
 /// For remote gateways, pass the same `RemoteOptions` used during deployment.
 pub async fn gateway_handle(name: &str, remote: Option<&RemoteOptions>) -> Result<GatewayHandle> {
+    let runtime = detect_runtime(None)?;
     let docker = match remote {
         Some(remote_opts) => create_ssh_docker_client(remote_opts).await?,
         None => Docker::connect_with_local_defaults().into_diagnostic()?,
@@ -609,6 +633,7 @@ pub async fn gateway_handle(name: &str, remote: Option<&RemoteOptions>) -> Resul
         name: name.to_string(),
         metadata,
         docker,
+        runtime,
     })
 }
 

@@ -8,19 +8,32 @@
 
 set -euo pipefail
 
+# shellcheck source=detect-container-runtime.sh
+source "$(dirname "$0")/detect-container-runtime.sh"
+
 OUTPUT_ARGS=(--load)
 if [[ "${DOCKER_PUSH:-}" == "1" ]]; then
-  OUTPUT_ARGS=(--push)
+	OUTPUT_ARGS=(--push)
 elif [[ "${DOCKER_PLATFORM:-}" == *","* ]]; then
-  OUTPUT_ARGS=(--push)
+	OUTPUT_ARGS=(--push)
 fi
 
-exec docker buildx build \
-  ${DOCKER_BUILDER:+--builder ${DOCKER_BUILDER}} \
-  ${DOCKER_PLATFORM:+--platform ${DOCKER_PLATFORM}} \
-  -f deploy/docker/Dockerfile.ci \
-  -t "openshell/ci:${IMAGE_TAG:-dev}" \
-  --provenance=false \
-  "$@" \
-  ${OUTPUT_ARGS[@]+"${OUTPUT_ARGS[@]}"} \
-  .
+if [[ "${CONTAINER_RUNTIME}" == "podman" ]]; then
+	exec podman build \
+		--layers \
+		${DOCKER_PLATFORM:+--platform ${DOCKER_PLATFORM}} \
+		-f deploy/docker/Dockerfile.ci \
+		-t "openshell/ci:${IMAGE_TAG:-dev}" \
+		"$@" \
+		.
+else
+	exec docker buildx build \
+		${DOCKER_BUILDER:+--builder ${DOCKER_BUILDER}} \
+		${DOCKER_PLATFORM:+--platform ${DOCKER_PLATFORM}} \
+		-f deploy/docker/Dockerfile.ci \
+		-t "openshell/ci:${IMAGE_TAG:-dev}" \
+		--provenance=false \
+		"$@" \
+		${OUTPUT_ARGS[@]+"${OUTPUT_ARGS[@]}"} \
+		.
+fi

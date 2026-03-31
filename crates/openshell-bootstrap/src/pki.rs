@@ -24,6 +24,7 @@ const DEFAULT_SERVER_SANS: &[&str] = &[
     "openshell.openshell.svc.cluster.local",
     "localhost",
     "host.docker.internal",
+    "host.containers.internal",
     "127.0.0.1",
 ];
 

@@ -1022,6 +1022,7 @@ pub async fn gateway_add(
             auth_mode: Some("mtls".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            container_runtime: "docker".to_string(),
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1051,6 +1052,7 @@ pub async fn gateway_add(
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            container_runtime: "docker".to_string(),
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1356,6 +1358,7 @@ pub async fn gateway_admin_deploy(
     registry_username: Option<&str>,
     registry_token: Option<&str>,
     gpu: Vec<String>,
+    container_runtime: Option<&str>,
 ) -> Result<()> {
     let location = if remote.is_some() { "remote" } else { "local" };
 
@@ -1410,6 +1413,10 @@ pub async fn gateway_admin_deploy(
         .with_disable_gateway_auth(disable_gateway_auth)
         .with_gpu(gpu)
         .with_recreate(recreate);
+    if let Some(rt_str) = container_runtime {
+        let rt = openshell_bootstrap::ContainerRuntime::from_str_loose(rt_str)?;
+        options = options.with_container_runtime(rt);
+    }
     if let Some(opts) = remote_opts {
         options = options.with_remote(opts);
     }
@@ -1640,9 +1647,9 @@ pub async fn doctor_logs(
         .await
 }
 
-/// Run a command inside the gateway Docker container.
+/// Run a command inside the gateway container.
 ///
-/// Spawns `docker exec` (or `ssh <host> docker exec` for remote gateways)
+/// Spawns `docker exec` or `podman exec` (or via SSH for remote gateways)
 /// as a child process with the user's terminal attached, so interactive
 /// tools like `k9s` and `kubectl` work natively.
 pub fn doctor_exec(
@@ -1650,10 +1657,13 @@ pub fn doctor_exec(
     remote: Option<&str>,
     ssh_key: Option<&str>,
     command: &[String],
+    container_runtime: Option<&str>,
 ) -> Result<()> {
     validate_gateway_name(name)?;
     let container = container_name(name);
     let is_tty = std::io::stdin().is_terminal();
+    let runtime = openshell_bootstrap::detect_runtime(container_runtime)?;
+    let binary = runtime.binary_name();
 
     // Wrap the user command with KUBECONFIG set
     let inner_cmd = if command.is_empty() {
@@ -1677,7 +1687,7 @@ pub fn doctor_exec(
     let mut cmd = if let Some(ref host) = remote_host {
         validate_ssh_host(host)?;
 
-        // Remote: ssh <host> docker exec [-it] <container> sh -lc '<inner_cmd>'
+        // Remote: ssh <host> <runtime> exec [-it] <container> sh -lc '<inner_cmd>'
         //
         // SSH concatenates all arguments after the hostname into a single
         // string for the remote shell, so inner_cmd must be escaped twice:
@@ -1693,7 +1703,7 @@ pub fn doctor_exec(
             c.arg("-t");
         }
         c.arg(host);
-        c.arg("docker");
+        c.arg(binary);
         c.arg("exec");
         if is_tty {
             c.args(["-it"]);
@@ -1703,8 +1713,8 @@ pub fn doctor_exec(
         c.args([&container, "sh", "-lc", &ssh_escaped_cmd]);
         c
     } else {
-        // Local: docker exec [-it] <container> sh -lc '<inner_cmd>'
-        let mut c = Command::new("docker");
+        // Local: <runtime> exec [-it] <container> sh -lc '<inner_cmd>'
+        let mut c = Command::new(binary);
         c.arg("exec");
         if is_tty {
             c.args(["-it"]);
@@ -1718,7 +1728,7 @@ pub fn doctor_exec(
     let status = cmd
         .status()
         .into_diagnostic()
-        .wrap_err("failed to execute docker exec")?;
+        .wrap_err_with(|| format!("failed to execute {binary} exec"))?;
 
     if !status.success() {
         let code = status.code().unwrap_or(1);
@@ -1746,16 +1756,22 @@ pub fn doctor_llm() -> Result<()> {
 
 /// Validate system prerequisites for running a gateway.
 ///
-/// Checks Docker connectivity and reports the result. Returns exit code 0
-/// if all checks pass, 1 otherwise.
-pub async fn doctor_check() -> Result<()> {
+/// Checks container runtime connectivity and reports the result. Returns
+/// exit code 0 if all checks pass, 1 otherwise.
+pub async fn doctor_check(container_runtime: Option<&str>) -> Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
 
+    let runtime = openshell_bootstrap::detect_runtime(container_runtime)?;
+    let rt_name = runtime.display_name();
+    let host_env = runtime.host_env_var();
+
     writeln!(stdout, "Checking system prerequisites...\n").into_diagnostic()?;
 
-    // --- Docker connectivity ---
-    write!(stdout, "  Docker ............. ").into_diagnostic()?;
+    // --- Container runtime connectivity ---
+    let label = format!("  {rt_name} ");
+    let dots = ".".repeat(21usize.saturating_sub(label.len()));
+    write!(stdout, "{label}{dots} ").into_diagnostic()?;
     stdout.flush().into_diagnostic()?;
 
     match openshell_bootstrap::check_docker_available().await {
@@ -1763,9 +1779,11 @@ pub async fn doctor_check() -> Result<()> {
             let version_str = preflight.version.as_deref().unwrap_or("unknown");
             writeln!(stdout, "ok (version {version_str})").into_diagnostic()?;
 
-            // --- DOCKER_HOST ---
-            write!(stdout, "  DOCKER_HOST ........ ").into_diagnostic()?;
-            match std::env::var("DOCKER_HOST") {
+            // --- Host env var ---
+            let env_label = format!("  {host_env} ");
+            let env_dots = ".".repeat(21usize.saturating_sub(env_label.len()));
+            write!(stdout, "{env_label}{env_dots} ").into_diagnostic()?;
+            match std::env::var(host_env) {
                 Ok(val) => writeln!(stdout, "{val}").into_diagnostic()?,
                 Err(_) => writeln!(stdout, "(not set, using default socket)").into_diagnostic()?,
             };
@@ -5097,6 +5115,7 @@ mod tests {
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            container_runtime: "docker".to_string(),
         }
     }
 
@@ -5485,6 +5504,7 @@ mod tests {
                 auth_mode: None,
                 edge_team_domain: None,
                 edge_auth_url: None,
+                container_runtime: "docker".to_string(),
             },
         ];
 

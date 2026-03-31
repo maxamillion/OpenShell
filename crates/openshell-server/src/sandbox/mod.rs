@@ -937,13 +937,14 @@ fn sandbox_template_to_k8s(
         );
     }
 
-    // Add hostAliases so sandbox pods can reach the Docker host.
+    // Add hostAliases so sandbox pods can reach the container host.
+    // Both Docker and Podman aliases are included for cross-runtime compat.
     if !host_gateway_ip.is_empty() {
         spec.insert(
             "hostAliases".to_string(),
             serde_json::json!([{
                 "ip": host_gateway_ip,
-                "hostnames": ["host.docker.internal", "host.openshell.internal"]
+                "hostnames": ["host.docker.internal", "host.containers.internal", "host.openshell.internal"]
             }]),
         );
     }
@@ -1772,6 +1773,7 @@ mod tests {
             .as_array()
             .expect("hostnames should exist");
         assert!(hostnames.contains(&serde_json::json!("host.docker.internal")));
+        assert!(hostnames.contains(&serde_json::json!("host.containers.internal")));
         assert!(hostnames.contains(&serde_json::json!("host.openshell.internal")));
     }
 
