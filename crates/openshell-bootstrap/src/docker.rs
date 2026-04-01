@@ -9,9 +9,10 @@ use bollard::API_DEFAULT_VERSION;
 use bollard::Docker;
 use bollard::errors::Error as BollardError;
 use bollard::models::{
-    ContainerCreateBody, DeviceRequest, EndpointSettings, HostConfig, HostConfigCgroupnsModeEnum,
-    NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest, PortBinding,
-    RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
+    ContainerCreateBody, DeviceRequest, EndpointSettings, HealthConfig, HostConfig,
+    HostConfigCgroupnsModeEnum, NetworkConnectRequest, NetworkCreateRequest,
+    NetworkDisconnectRequest, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, InspectContainerOptions, InspectNetworkOptions,
@@ -880,12 +881,29 @@ pub async fn ensure_container(
 
     let env = Some(env_vars);
 
+    // Set the health check explicitly on the container config so it works
+    // on both Docker and Podman. Podman with OCI image format ignores the
+    // Dockerfile HEALTHCHECK directive, but honors health checks configured
+    // at container creation time via the API.
+    let healthcheck = HealthConfig {
+        test: Some(vec![
+            "CMD".to_string(),
+            "/usr/local/bin/cluster-healthcheck.sh".to_string(),
+        ]),
+        interval: Some(5_000_000_000),      // 5s in nanoseconds
+        timeout: Some(5_000_000_000),       // 5s
+        start_period: Some(20_000_000_000), // 20s
+        retries: Some(60),
+        ..Default::default()
+    };
+
     let config = ContainerCreateBody {
         image: Some(image_ref.to_string()),
         cmd: Some(cmd),
         env,
         exposed_ports: Some(exposed_ports),
         host_config: Some(host_config),
+        healthcheck: Some(healthcheck),
         ..Default::default()
     };
 
