@@ -566,6 +566,13 @@ if [ -r /proc/self/uid_map ]; then
 	if [ "$_inner_uid" = "0" ] && [ "$_outer_uid" != "0" ]; then
 		echo "Detected user namespace (rootless container) — enabling KubeletInUserNamespace"
 		EXTRA_KUBELET_ARGS="$EXTRA_KUBELET_ARGS --kubelet-arg=feature-gates=KubeletInUserNamespace=true"
+		# Force kubelet to create kubepods under the cgroup root (/sys/fs/cgroup/)
+		# rather than under the entrypoint's own cgroup. The entrypoint moves
+		# itself to /sys/fs/cgroup/init/ to satisfy the cgroup v2 "no internal
+		# process" constraint when enabling controllers in subtree_control.
+		# Without this, kubelet inherits the init/ cgroup and creates kubepods
+		# there, where subtree_control has not been configured.
+		EXTRA_KUBELET_ARGS="$EXTRA_KUBELET_ARGS --kubelet-arg=cgroup-root=/"
 
 		# k3s requires IP forwarding. In rootless containers the sysctl
 		# may default to 0 since the network namespace is isolated.
