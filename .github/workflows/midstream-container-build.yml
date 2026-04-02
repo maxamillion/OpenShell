@@ -34,7 +34,7 @@ jobs:
             platform: linux/amd64
           - component: gateway
             arch: arm64
-            runner: ubuntu-latest-arm64
+            runner: ubuntu-24.04-arm
             platform: linux/arm64
           - component: cluster
             arch: amd64
@@ -42,7 +42,7 @@ jobs:
             platform: linux/amd64
           - component: cluster
             arch: arm64
-            runner: ubuntu-latest-arm64
+            runner: ubuntu-24.04-arm
             platform: linux/arm64
     steps:
       - name: Checkout
