@@ -1,6 +1,6 @@
 # LobsterTrap MIDSTREAM OpenShell BUILD
 
-# NOTES ABOUT THIS BUILD
+# ***NOTES ABOUT THIS MIDSTREAM BRANCH***
 
 **This is a midstream build of OpenShell powered by the LobsterTrap Community. Here we are rapidly iterating on ideas and features that will be added to the mainline OpenShell repo as soon as we feel they are ready for upstream contribution.**
 
