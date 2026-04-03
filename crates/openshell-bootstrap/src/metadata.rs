@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::RemoteOptions;
 use crate::container_runtime::ContainerRuntime;
 use crate::paths::{active_gateway_path, gateways_dir, last_sandbox_path};
-use crate::RemoteOptions;
 use miette::{IntoDiagnostic, Result, WrapErr};
 use openshell_core::paths::ensure_parent_dir_restricted;
 use serde::{Deserialize, Serialize};
