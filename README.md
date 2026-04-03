@@ -1,4 +1,12 @@
-# NVIDIA OpenShell
+# LobsterTrap MIDSTREAM OpenShell BUILD
+
+# NOTES ABOUT THIS BUILD
+
+**This is a midstream build of OpenShell powered by the LobsterTrap Community. Here we are rapidly iterating on ideas and features that will be added to the mainline OpenShell repo as soon as we feel they are ready for upstream contribution.**
+
+This build uses the ghcr.io/lobstertap/openshell images for the OpenShell CLI and OpenShell Terminal UI instead of upstream's for a couple reasons. The first is that we need to patch the container runtime to enable certain features and because we are experimenting with using [Project Hummingbird](https://hummingbird-project.io/) images instead of mainline Ubuntu. Fresh images builds are kicked off every time new code is merged into this `midstream` branch.
+
+This build is also available as a set of RPM packages that are installable from the [maxamillion/openshell](https://copr.fedorainfracloud.org/coprs/maxamillion/openshell/) Fedora Copr repo. Fresh builds are kicked off every time new code is merged into this `midstream` branch.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/LobsterTrap/OpenShell/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/badge/PyPI-openshell-orange?logo=pypi)](https://pypi.org/project/openshell/)
@@ -11,6 +19,7 @@ OpenShell is the safe, private runtime for autonomous AI agents. It provides san
 OpenShell is built agent-first. The project ships with agent skills for everything from cluster debugging to policy generation, and we expect contributors to use them.
 
 > **Alpha software — single-player mode.** OpenShell is proof-of-life: one developer, one environment, one gateway. We are building toward multi-tenant enterprise deployments, but the starting point is getting your own environment up and running. Expect rough edges. Bring your agent.
+
 
 ## Quickstart
 
