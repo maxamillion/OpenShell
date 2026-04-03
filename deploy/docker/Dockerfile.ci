@@ -39,6 +39,9 @@ RUN dnf install -y \
     rsync \
     tar \
     gzip \
+    diffutils \
+    gawk \
+    findutils \
     && dnf clean all
 
 # Install Docker CLI and buildx plugin used by CI jobs
