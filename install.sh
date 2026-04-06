@@ -17,7 +17,7 @@
 set -eu
 
 APP_NAME="openshell"
-REPO="LobsterTrap/OpenShell"
+REPO="${OPENSHELL_REPO:-LobsterTrap/OpenShell}"
 GITHUB_URL="https://github.com/${REPO}"
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@
 //! explicit override via the `OPENSHELL_CONTAINER_RUNTIME` environment variable
 //! or `--container-runtime` CLI flag.
 
-use miette::{miette, Result};
+use miette::{Result, miette};
 use std::fmt;
 use std::path::Path;
 
