@@ -30,9 +30,12 @@ This page gets you from zero to a running, policy-enforced sandbox in two comman
 
 ## Prerequisites
 
-Before you begin, make sure you have:
+Before you begin, make sure you have a container runtime running on your machine. OpenShell supports Docker and Podman.
 
-- Docker Desktop or Podman running on your machine. On Linux with rootless Podman, refer to {doc}`../sandboxes/manage-gateways` for additional setup.
+- **Docker Desktop** works out of the box on Linux and macOS with no additional configuration.
+- **Podman** requires additional setup depending on your platform:
+  - Linux: refer to {doc}`install-podman-linux` for rootless and rootful setup.
+  - macOS: refer to {doc}`install-podman-macos` for Podman Machine setup.
 
 For a complete list of requirements, refer to {doc}`../reference/support-matrix`.
 
