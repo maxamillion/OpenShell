@@ -28,6 +28,32 @@ content:
 
 This guide walks through installing and configuring Podman on Linux for use with OpenShell. It covers both rootless mode (recommended for desktops and laptops) and rootful mode (simpler for headless servers).
 
+## Quick Start
+
+Run the automated setup script to handle all the steps in this guide:
+
+::::{tab-set}
+
+:::{tab-item} Rootless (Recommended)
+
+```console
+$ bash scripts/setup-podman-linux.sh
+```
+
+:::
+
+:::{tab-item} Rootful
+
+```console
+$ bash scripts/setup-podman-linux.sh --rootful
+```
+
+:::
+
+::::
+
+The script detects your package manager, installs Podman if needed, configures the Podman socket and cgroup delegation, and handles headless-specific steps (login lingering, `XDG_RUNTIME_DIR`) when it detects no graphical session. The rest of this guide covers each step individually for users who prefer manual configuration.
+
 ## Prerequisites
 
 - A systemd-based Linux distribution (Fedora, RHEL, CentOS Stream, Debian, Ubuntu)
