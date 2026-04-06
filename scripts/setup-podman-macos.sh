@@ -48,17 +48,31 @@ if [[ "${EXISTING:-false}" != "true" ]]; then
     podman machine init "${MACHINE_NAME}" --memory "${MEMORY}" --cpus "${CPUS}"
 fi
 
-# Stop any other running machines
-echo ""
-echo "Stopping other Podman machines (only one can run at a time)..."
-for machine in $(podman machine list --format '{{.Name}}' --noheading); do
-    if [[ "$machine" != "${MACHINE_NAME}" ]]; then
-        if podman machine list --format '{{.Name}} {{.Running}}' | grep "^${machine} " | grep -q "true"; then
+# Check for other running machines
+RUNNING_MACHINES=$(podman machine list --format '{{.Name}} {{.Running}}' | grep -v "^${MACHINE_NAME} " | grep "true" | awk '{print $1}' || true)
+
+if [ -n "${RUNNING_MACHINES}" ]; then
+    echo ""
+    echo "⚠️  Other Podman machines are currently running:"
+    echo "${RUNNING_MACHINES}" | while read -r machine; do
+        echo "  - ${machine}"
+    done
+    echo ""
+    echo "Only one Podman machine can run at a time."
+    read -p "Stop these machines to continue? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Stopping other Podman machines..."
+        echo "${RUNNING_MACHINES}" | while read -r machine; do
             echo "  Stopping ${machine}..."
             podman machine stop "${machine}" 2>/dev/null || true
-        fi
+        done
+    else
+        echo "Cannot start '${MACHINE_NAME}' while other machines are running."
+        echo "Please stop them manually and run this script again."
+        exit 1
     fi
-done
+fi
 
 # Start the machine
 echo ""
@@ -92,34 +106,11 @@ echo "=== Setup Complete ==="
 echo ""
 echo "Podman machine '${MACHINE_NAME}' is ready!"
 echo ""
-echo "Environment variables (add to your shell profile):"
-echo "  export CONTAINER_HOST=\"unix://${SOCKET_PATH}\""
-echo "  export OPENSHELL_CONTAINER_RUNTIME=podman"
-echo ""
-echo "To set them now, run:"
-echo "  export CONTAINER_HOST=\"unix://${SOCKET_PATH}\""
-echo "  export OPENSHELL_CONTAINER_RUNTIME=podman"
-echo ""
-
-# Offer to add to shell profile
-read -p "Add environment variables to ~/.zshrc? (y/N) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    if ! grep -q "CONTAINER_HOST.*${MACHINE_NAME}" ~/.zshrc 2>/dev/null; then
-        echo "" >> ~/.zshrc
-        echo "# OpenShell Podman environment" >> ~/.zshrc
-        echo "export CONTAINER_HOST=\"unix://${SOCKET_PATH}\"" >> ~/.zshrc
-        echo "export OPENSHELL_CONTAINER_RUNTIME=podman" >> ~/.zshrc
-        echo "✓ Added to ~/.zshrc"
-        echo "  Run: source ~/.zshrc"
-    else
-        echo "⚠️  Environment variables already in ~/.zshrc"
-    fi
-fi
-
-echo ""
 echo "Next steps:"
-echo "  1. Source your shell profile or set environment variables"
-echo "  2. Build cluster image: mise run docker:build:cluster"
+echo "  1. Set up environment: source scripts/podman.env"
+echo "  2. Build and deploy: mise run cluster:build:full"
 echo "  3. Build CLI: cargo build --release -p openshell-cli"
 echo "  4. Install CLI: cp target/release/openshell ~/.local/bin/"
+echo ""
+echo "To make the environment persistent, add to your shell profile (~/.zshrc):"
+echo "  source $(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/podman.env"

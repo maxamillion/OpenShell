@@ -31,15 +31,14 @@ This guide walks through installing and configuring Podman on macOS (Apple Silic
 ## Quick Start
 
 ```console
-$ brew install podman mise
-$ bash scripts/setup-podman-macos.sh
-$ source ~/.zshrc
-$ mise run docker:build:cluster
-$ podman tag localhost/openshell/cluster:dev ghcr.io/lobstertrap/openshell/cluster:dev
-$ cargo build --release -p openshell-cli
-$ mkdir -p ~/.local/bin
-$ cp target/release/openshell ~/.local/bin/
-$ openshell sandbox create
+brew install podman mise
+bash scripts/setup-podman-macos.sh
+source scripts/podman.env
+mise run cluster:build:full
+cargo build --release -p openshell-cli
+mkdir -p ~/.local/bin
+cp target/release/openshell ~/.local/bin/
+openshell sandbox create
 ```
 
 ## Install Podman and mise
@@ -47,7 +46,7 @@ $ openshell sandbox create
 Install Podman (container runtime) and mise (task runner used by the OpenShell project):
 
 ```console
-$ brew install podman mise
+brew install podman mise
 ```
 
 ## Run the Automated Setup Script
@@ -56,52 +55,74 @@ The `scripts/setup-podman-macos.sh` script automates Podman Machine configuratio
 
 - Creates a dedicated `openshell` Podman machine (8 GB RAM, 4 CPUs)
 - Configures cgroup delegation (required for the embedded k3s cluster)
-- Sets up environment variables
-- Stops conflicting machines (only one can run at a time)
-- Optionally adds environment variables to your shell profile
+- Stops conflicting machines (only one can run at a time, with user confirmation)
 
 ```console
-$ bash scripts/setup-podman-macos.sh
+bash scripts/setup-podman-macos.sh
 ```
 
-Follow the script's instructions to set environment variables. If you chose to add them to your shell profile:
+## Set Up Environment Variables
+
+Source the `scripts/podman.env` file to configure your shell for local development:
 
 ```console
-$ source ~/.zshrc
+source scripts/podman.env
 ```
 
-## Build the Cluster Image
+This sets:
+- `CONTAINER_HOST` - Podman socket path
+- `OPENSHELL_CONTAINER_RUNTIME=podman` - Use Podman runtime
+- `OPENSHELL_REGISTRY=127.0.0.1:5000/openshell` - Local registry for component images
+- `OPENSHELL_CLUSTER_IMAGE=localhost/openshell/cluster:dev` - Local cluster image
 
-Using mise:
+To make these persistent, add to your shell profile (`~/.zshrc` or `~/.bashrc`):
 
 ```console
-$ mise run docker:build:cluster
+echo "source $(pwd)/scripts/podman.env" >> ~/.zshrc
 ```
 
-Or directly without mise:
+## Build and Deploy the Cluster
+
+Build images, set up the local registry, and deploy the k3s cluster:
 
 ```console
-$ tasks/scripts/docker-build-image.sh cluster
+mise run cluster:build:full
 ```
 
-Tag the image for local use:
+This command:
+- Builds the gateway image
+- Starts a local container registry at `127.0.0.1:5000`
+- Builds the cluster image
+- Pushes images to the local registry
+- Bootstraps a k3s cluster inside a Podman container
+- Deploys the OpenShell gateway
+
+Or run the script directly:
 
 ```console
-$ podman tag localhost/openshell/cluster:dev ghcr.io/lobstertrap/openshell/cluster:dev
+tasks/scripts/cluster-bootstrap.sh build
 ```
 
 ## Build and Install the CLI
 
+**Note:** If you ran `mise run cluster:build:full` above, a debug version of the CLI was automatically compiled. You can use it directly from the project directory without installing:
+
 ```console
-$ cargo build --release -p openshell-cli
-$ mkdir -p ~/.local/bin
-$ cp target/release/openshell ~/.local/bin/
+./target/debug/openshell --version
+```
+
+For a release-optimized binary that works system-wide:
+
+```console
+cargo build --release -p openshell-cli
+mkdir -p ~/.local/bin
+cp target/release/openshell ~/.local/bin/
 ```
 
 ## Create a Sandbox
 
 ```console
-$ openshell sandbox create
+openshell sandbox create
 ```
 
 ## Cleanup
@@ -109,19 +130,17 @@ $ openshell sandbox create
 To remove all OpenShell resources and optionally the Podman machine:
 
 ```console
-$ bash cleanup-openshell-podman-macos.sh
+bash cleanup-openshell-podman-macos.sh
 ```
 
 ## Troubleshooting
 
 ### Environment variables not set
 
-If OpenShell cannot find the Podman socket, set the environment variables manually:
+If OpenShell cannot find the Podman socket, source the environment file:
 
 ```console
-$ SOCKET=$(podman machine inspect openshell --format '{{.ConnectionInfo.PodmanSocket.Path}}')
-$ export CONTAINER_HOST="unix://${SOCKET}"
-$ export OPENSHELL_CONTAINER_RUNTIME=podman
+source scripts/podman.env
 ```
 
 ### "Gateway not reachable"
@@ -129,8 +148,8 @@ $ export OPENSHELL_CONTAINER_RUNTIME=podman
 Destroy the existing gateway and recreate:
 
 ```console
-$ openshell gateway destroy --name openshell
-$ openshell sandbox create
+openshell gateway destroy --name openshell
+openshell sandbox create
 ```
 
 ### Build fails with memory errors
@@ -138,9 +157,9 @@ $ openshell sandbox create
 Increase the Podman machine memory allocation:
 
 ```console
-$ podman machine stop openshell
-$ podman machine set openshell --memory 8192
-$ podman machine start openshell
+podman machine stop openshell
+podman machine set openshell --memory 8192
+podman machine start openshell
 ```
 
 ### "failed to find cpuset cgroup"
@@ -148,7 +167,7 @@ $ podman machine start openshell
 Verify cgroup delegation inside the Podman machine:
 
 ```console
-$ podman machine ssh openshell "cat /etc/systemd/system/user@.service.d/delegate.conf"
+podman machine ssh openshell "cat /etc/systemd/system/user@.service.d/delegate.conf"
 ```
 
 The output should show `Delegate=cpu cpuset io memory pids`. If not, run `scripts/setup-podman-macos.sh` again.
