@@ -263,6 +263,16 @@ pub(crate) fn connect_local(runtime: ContainerRuntime) -> Result<Docker> {
     }
 }
 
+/// Connect to the local container runtime with auto-detection.
+///
+/// This is a convenience wrapper for code paths that need a Docker client
+/// but don't have a `ContainerRuntime` value available. It auto-detects
+/// the runtime (Podman preferred) and connects via `connect_local`.
+pub(crate) fn connect_local_auto() -> Result<Docker> {
+    let runtime = crate::container_runtime::detect_runtime(None)?;
+    connect_local(runtime)
+}
+
 /// Build a rich, user-friendly error when a container runtime is not reachable.
 fn runtime_not_reachable_error(
     runtime: ContainerRuntime,
