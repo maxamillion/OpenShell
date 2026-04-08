@@ -103,20 +103,6 @@ Podman 4.0 or later is required.
 
 Rootless Podman runs containers without root privileges. This is the default mode on Fedora and RHEL 9+ and the recommended configuration for desktops and laptops.
 
-### Enable the Podman Socket
-
-OpenShell communicates with Podman through a Unix socket. Enable the rootless socket for your user:
-
-```console
-$ systemctl --user enable --now podman.socket
-```
-
-Verify the socket exists:
-
-```console
-$ ls $XDG_RUNTIME_DIR/podman/podman.sock
-```
-
 ### Configure Cgroup Delegation
 
 OpenShell runs an embedded k3s cluster inside the gateway container. k3s needs to manage cgroup controllers for pod resource isolation. Without cgroup delegation, the gateway fails to start.
@@ -140,45 +126,37 @@ $ cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.subtree_control
 
 The output should include `cpuset cpu io memory pids`.
 
-### Enable Login Lingering (Headless Systems)
+### Headless Systems Prerequisites
 
 :::{note}
-**Headless/SSH systems only.** Skip this step on desktops and laptops where you log in directly. On those systems, your user session persists and systemd user services stay running.
+**Headless/SSH systems only.** If you log in directly at a desktop session, skip ahead to [Enable the Podman Socket](#enable-the-podman-socket). Desktop sessions handle login lingering, `XDG_RUNTIME_DIR`, and the D-Bus session bus automatically via PAM.
 :::
 
-On headless systems accessed only over SSH, systemd terminates all user services when the last SSH session disconnects. This kills the Podman socket and any running gateway container. Login lingering tells systemd to keep your user services alive regardless of active sessions:
+On headless systems (accessed only over SSH, or when switching users with `su`/`sudo su`), three things must be configured before `systemctl --user` will work. Complete these steps in order.
+
+**Enable login lingering.** Without lingering, systemd does not start a user session manager for your account. This means there is no D-Bus session bus, no user socket directory, and `systemctl --user` cannot function:
 
 ```console
-$ loginctl enable-linger $USER
+$ sudo loginctl enable-linger $USER
 ```
 
-Verify:
+Verify lingering is active:
 
 ```console
 $ loginctl show-user $USER --property=Linger
 Linger=yes
 ```
 
-### Verify XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS (Headless Systems)
+Lingering also keeps your user services alive when all SSH sessions disconnect, which prevents the Podman socket and gateway container from being killed.
 
-:::{note}
-**Headless/SSH systems only.** Desktop sessions and direct SSH logins with PAM enabled set these variables automatically. This step is only needed if you switch users with `su`/`sudo su` or have a minimal SSH configuration that does not run PAM session modules.
-:::
-
-`systemctl --user` and the rootless Podman socket require two environment variables: `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. If either is missing, `systemctl --user` fails with:
-
-```
-Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined
-```
-
-Check whether they are set:
+**Set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS.** `systemctl --user` needs these two environment variables to find the user session bus. Direct SSH logins with PAM enabled set them automatically. If you access the system via `su -` or `sudo su`, they are not set. Check whether they exist:
 
 ```console
 $ echo $XDG_RUNTIME_DIR
 $ echo $DBUS_SESSION_BUS_ADDRESS
 ```
 
-If either is empty, add the following to your `~/.bashrc` (or equivalent shell profile):
+If either is empty, add the following to `~/.bashrc` (or equivalent shell profile):
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -191,7 +169,23 @@ Then reload:
 $ source ~/.bashrc
 ```
 
-After setting these variables, `systemctl --user` commands will work correctly.
+:::{warning}
+Order matters. Login lingering must be enabled before setting `DBUS_SESSION_BUS_ADDRESS`. The bus socket at `$XDG_RUNTIME_DIR/bus` is only created when systemd starts the user session manager, which requires lingering. If you set the env var first without linger, you will get "No such file or directory" because the socket does not exist yet.
+:::
+
+### Enable the Podman Socket
+
+OpenShell communicates with Podman through a Unix socket. Enable the rootless socket for your user:
+
+```console
+$ systemctl --user enable --now podman.socket
+```
+
+Verify the socket exists:
+
+```console
+$ ls $XDG_RUNTIME_DIR/podman/podman.sock
+```
 
 ### Verify Subuid and Subgid
 
@@ -362,7 +356,7 @@ For rootless mode, enable the user socket:
 $ systemctl --user enable --now podman.socket
 ```
 
-If this fails with `$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined`, see the [systemctl --user fails over SSH](#systemctl-user-fails-over-ssh) section below.
+If this fails with `$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined` or `No such file or directory`, see the [systemctl --user fails](#systemctl-user-fails-with-not-defined-or-no-such-file-or-directory) section below.
 
 Verify the socket is active:
 
@@ -373,35 +367,49 @@ $ sudo systemctl status podman.socket     # rootful
 
 After enabling the socket, retry `openshell gateway start`.
 
-### systemctl --user fails over SSH
+### systemctl --user fails with "not defined" or "No such file or directory"
 
-If `systemctl --user` commands fail with:
+`systemctl --user` can fail with two related errors depending on what is missing:
+
+**Error: variables not defined**
 
 ```
 Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined
 ```
 
-Your shell session is missing the environment variables that systemd needs to locate your user session bus. This commonly happens when you switch users with `su -` or `sudo su` instead of logging in directly, or when your SSH server does not run the PAM session modules that set these variables.
+This means the environment variables are not set. This happens when you switch users with `su -` or `sudo su`, or when your SSH server does not run PAM session modules.
 
-First, ensure login lingering is enabled so that systemd starts a user session manager at boot:
+**Error: No such file or directory**
 
-```console
-$ sudo loginctl enable-linger $USER
+```
+Failed to connect to user scope bus via local transport: No such file or directory
 ```
 
-Then set the missing variables in your shell profile (`~/.bashrc` or equivalent):
+This means the variables are set but the D-Bus bus socket at `$XDG_RUNTIME_DIR/bus` does not exist. This happens when login lingering is not enabled — systemd has not started a user session manager for your account, so the bus socket was never created.
 
-```bash
-export XDG_RUNTIME_DIR=/run/user/$(id -u)
-export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
-```
+**Fix for both errors:**
 
-Reload the profile and retry:
+The steps must be done in this order:
 
-```console
-$ source ~/.bashrc
-$ systemctl --user enable --now podman.socket
-```
+1. Enable login lingering (this starts the systemd user session manager, which creates the bus socket):
+
+   ```console
+   $ sudo loginctl enable-linger $USER
+   ```
+
+2. Set the environment variables in your shell profile (`~/.bashrc` or equivalent):
+
+   ```bash
+   export XDG_RUNTIME_DIR=/run/user/$(id -u)
+   export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+   ```
+
+3. Reload and retry:
+
+   ```console
+   $ source ~/.bashrc
+   $ systemctl --user enable --now podman.socket
+   ```
 
 :::{tip}
 If you SSH directly as the target user (rather than `su` from root), most distributions set these variables automatically via PAM. If you still see this error after a direct SSH login, check that `UsePAM yes` is set in `/etc/ssh/sshd_config`.
