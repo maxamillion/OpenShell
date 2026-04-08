@@ -338,21 +338,28 @@ Common causes:
 
 ### Podman socket not found
 
-If OpenShell reports that no container runtime is available:
+If OpenShell reports "Podman is installed but its API socket is not active," the Podman binary is present but the systemd socket unit that exposes its API is not running. This is common on fresh installs where `dnf install podman` or `apt install podman` does not enable the socket automatically.
 
-For rootless mode, verify the socket is running:
-
-```console
-$ systemctl --user status podman.socket
-$ ls $XDG_RUNTIME_DIR/podman/podman.sock
-```
-
-For rootful mode, verify the system socket:
+For rootful mode, enable the system socket:
 
 ```console
-$ sudo systemctl status podman.socket
-$ ls /run/podman/podman.sock
+$ sudo systemctl enable --now podman.socket
 ```
+
+For rootless mode, enable the user socket:
+
+```console
+$ systemctl --user enable --now podman.socket
+```
+
+Verify the socket is active:
+
+```console
+$ systemctl --user status podman.socket   # rootless
+$ sudo systemctl status podman.socket     # rootful
+```
+
+After enabling the socket, retry `openshell gateway start`.
 
 ### Permission denied in rootless mode
 
