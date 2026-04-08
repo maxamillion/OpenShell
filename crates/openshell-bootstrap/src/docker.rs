@@ -315,11 +315,36 @@ fn runtime_not_reachable_error(
                 "No container runtime socket found and {} is not set.",
                 host_env
             ));
-            hints.push(format!(
-                "Install and start {}. See the support matrix \
-                 in the OpenShell docs for tested configurations.",
-                runtime.display_name()
-            ));
+            // Check if the binary is installed but the socket is missing —
+            // this typically means the systemd socket unit needs activation.
+            if crate::container_runtime::has_binary(runtime.binary_name()) {
+                match runtime {
+                    ContainerRuntime::Podman => {
+                        hints.push(
+                            "Podman is installed but its API socket is not active.\n\n  \
+                             Enable the Podman socket with:\n\n    \
+                             sudo systemctl enable --now podman.socket\n\n  \
+                             For rootless Podman, run as your regular user:\n\n    \
+                             systemctl --user enable --now podman.socket"
+                                .to_string(),
+                        );
+                    }
+                    ContainerRuntime::Docker => {
+                        hints.push(
+                            "Docker is installed but its daemon is not running.\n\n  \
+                             Start Docker with:\n\n    \
+                             sudo systemctl start docker"
+                                .to_string(),
+                        );
+                    }
+                }
+            } else {
+                hints.push(format!(
+                    "Install and start {}. See the support matrix \
+                     in the OpenShell docs for tested configurations.",
+                    runtime.display_name()
+                ));
+            }
         } else {
             // Found sockets for possibly a different runtime
             let socket_list: Vec<String> = alt_sockets
@@ -1505,6 +1530,84 @@ mod tests {
         assert!(
             msg.contains("podman info"),
             "should suggest 'podman info' verification"
+        );
+    }
+
+    #[test]
+    fn runtime_not_reachable_error_podman_socket_hint() {
+        // When Podman is installed but no socket is found, the error should
+        // suggest enabling the systemd socket unit instead of "Install Podman".
+        //
+        // The exact hint branch depends on system state:
+        //   - Podman installed + sockets exist → "Found container runtime socket(s)" hint
+        //   - Podman installed + no sockets   → "systemctl enable --now podman.socket" hint
+        //   - Podman not installed            → "Install and start Podman" hint
+        //
+        // Clear env vars that would cause the function to take the "env var
+        // is set" branch instead of the "no socket" branch (other tests in
+        // this module may set DOCKER_HOST concurrently).
+        let prev_container_host = std::env::var("CONTAINER_HOST").ok();
+        let prev_docker_host = std::env::var("DOCKER_HOST").ok();
+        // SAFETY: test-only, single-threaded for this test
+        unsafe {
+            std::env::remove_var("CONTAINER_HOST");
+            std::env::remove_var("DOCKER_HOST");
+        }
+
+        let has_podman = crate::container_runtime::has_binary("podman");
+        let sockets = find_all_sockets();
+
+        let err = runtime_not_reachable_error(
+            ContainerRuntime::Podman,
+            "no Podman socket found at standard locations",
+            "Failed to connect to Podman",
+        );
+        let msg = format!("{err:?}");
+
+        // Restore env
+        // SAFETY: test-only, restoring previous state
+        unsafe {
+            match prev_container_host {
+                Some(val) => std::env::set_var("CONTAINER_HOST", val),
+                None => std::env::remove_var("CONTAINER_HOST"),
+            }
+            match prev_docker_host {
+                Some(val) => std::env::set_var("DOCKER_HOST", val),
+                None => std::env::remove_var("DOCKER_HOST"),
+            }
+        }
+
+        if !sockets.is_empty() {
+            // Sockets exist — the function takes the "found sockets" branch
+            assert!(
+                msg.contains("Found container runtime socket"),
+                "should list found sockets when they exist: {msg}"
+            );
+        } else if has_podman {
+            // No sockets, but Podman binary is on PATH — new hint path
+            assert!(
+                msg.contains("systemctl"),
+                "should suggest systemctl when Podman is installed but socket is missing: {msg}"
+            );
+            assert!(
+                msg.contains("podman.socket"),
+                "should mention podman.socket unit: {msg}"
+            );
+            assert!(
+                !msg.contains("Install and start Podman"),
+                "should NOT say 'Install and start' when Podman is already installed: {msg}"
+            );
+        } else {
+            // No sockets, no Podman binary — fallback install hint
+            assert!(
+                msg.contains("Install and start Podman"),
+                "should say 'Install and start' when Podman is not installed: {msg}"
+            );
+        }
+        // Regardless of system state, the verification hint must be present
+        assert!(
+            msg.contains("podman info"),
+            "should always suggest 'podman info' verification: {msg}"
         );
     }
 
