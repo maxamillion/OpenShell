@@ -159,22 +159,30 @@ $ loginctl show-user $USER --property=Linger
 Linger=yes
 ```
 
-### Verify XDG_RUNTIME_DIR (Headless Systems)
+### Verify XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS (Headless Systems)
 
 :::{note}
-**Headless/SSH systems only.** Desktop sessions set `XDG_RUNTIME_DIR` automatically via PAM. This step is only needed if you access the system exclusively over SSH.
+**Headless/SSH systems only.** Desktop sessions and direct SSH logins with PAM enabled set these variables automatically. This step is only needed if you switch users with `su`/`sudo su` or have a minimal SSH configuration that does not run PAM session modules.
 :::
 
-Some SSH configurations do not set `XDG_RUNTIME_DIR`, which prevents the rootless Podman socket from being found. Check whether it is set:
+`systemctl --user` and the rootless Podman socket require two environment variables: `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. If either is missing, `systemctl --user` fails with:
+
+```
+Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined
+```
+
+Check whether they are set:
 
 ```console
 $ echo $XDG_RUNTIME_DIR
+$ echo $DBUS_SESSION_BUS_ADDRESS
 ```
 
-If the output is empty, add the following to your `~/.bashrc` (or equivalent shell profile):
+If either is empty, add the following to your `~/.bashrc` (or equivalent shell profile):
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 ```
 
 Then reload:
@@ -182,6 +190,8 @@ Then reload:
 ```console
 $ source ~/.bashrc
 ```
+
+After setting these variables, `systemctl --user` commands will work correctly.
 
 ### Verify Subuid and Subgid
 
@@ -352,6 +362,8 @@ For rootless mode, enable the user socket:
 $ systemctl --user enable --now podman.socket
 ```
 
+If this fails with `$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined`, see the [systemctl --user fails over SSH](#systemctl-user-fails-over-ssh) section below.
+
 Verify the socket is active:
 
 ```console
@@ -360,6 +372,40 @@ $ sudo systemctl status podman.socket     # rootful
 ```
 
 After enabling the socket, retry `openshell gateway start`.
+
+### systemctl --user fails over SSH
+
+If `systemctl --user` commands fail with:
+
+```
+Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined
+```
+
+Your shell session is missing the environment variables that systemd needs to locate your user session bus. This commonly happens when you switch users with `su -` or `sudo su` instead of logging in directly, or when your SSH server does not run the PAM session modules that set these variables.
+
+First, ensure login lingering is enabled so that systemd starts a user session manager at boot:
+
+```console
+$ sudo loginctl enable-linger $USER
+```
+
+Then set the missing variables in your shell profile (`~/.bashrc` or equivalent):
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+```
+
+Reload the profile and retry:
+
+```console
+$ source ~/.bashrc
+$ systemctl --user enable --now podman.socket
+```
+
+:::{tip}
+If you SSH directly as the target user (rather than `su` from root), most distributions set these variables automatically via PAM. If you still see this error after a direct SSH login, check that `UsePAM yes` is set in `/etc/ssh/sshd_config`.
+:::
 
 ### Permission denied in rootless mode
 
