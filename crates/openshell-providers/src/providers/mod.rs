@@ -9,6 +9,7 @@ pub mod generic;
 pub mod github;
 pub mod gitlab;
 pub mod nvidia;
+pub mod oauth2;
 pub mod openai;
 pub mod opencode;
 pub mod outlook;

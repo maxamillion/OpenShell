@@ -268,9 +268,47 @@ const SETTINGS_EXAMPLES: &str = "\x1b[1mEXAMPLES\x1b[0m
 const PROVIDER_EXAMPLES: &str = "\x1b[1mEXAMPLES\x1b[0m
   $ openshell provider create --name openai --type openai --credential OPENAI_API_KEY
   $ openshell provider create --name anthropic --type anthropic --from-existing
+  $ openshell provider create --name my-oauth --type oauth2 \\
+      --config auth_method=oauth2 --config oauth_grant_type=client_credentials \\
+      --config oauth_token_endpoint=https://auth.example.com/oauth/token \\
+      --credential OAUTH_CLIENT_ID=<id> --credential OAUTH_CLIENT_SECRET=<secret>
   $ openshell provider list
   $ openshell provider get openai
   $ openshell provider delete openai
+";
+
+const PROVIDER_CREATE_EXAMPLES: &str = "\x1b[1mEXAMPLES\x1b[0m
+  Create a static-credential provider:
+  $ openshell provider create --name openai --type openai --credential OPENAI_API_KEY
+
+  Create an OAuth2 provider (client_credentials grant):
+  $ openshell provider create --name my-oauth --type oauth2 \\
+      --config auth_method=oauth2 \\
+      --config oauth_grant_type=client_credentials \\
+      --config oauth_token_endpoint=https://auth.example.com/oauth/token \\
+      --credential OAUTH_CLIENT_ID=<client-id> \\
+      --credential OAUTH_CLIENT_SECRET=<client-secret>
+
+  Create an OAuth2 provider (refresh_token grant):
+  $ openshell provider create --name my-oauth --type oauth2 \\
+      --config auth_method=oauth2 \\
+      --config oauth_grant_type=refresh_token \\
+      --config oauth_token_endpoint=https://auth.example.com/oauth/token \\
+      --credential OAUTH_CLIENT_ID=<client-id> \\
+      --credential OAUTH_CLIENT_SECRET=<client-secret> \\
+      --credential OAUTH_REFRESH_TOKEN=<refresh-token>
+
+\x1b[1mOAUTH2 CONFIG KEYS\x1b[0m
+  auth_method            Must be \"oauth2\"
+  oauth_grant_type       \"client_credentials\" or \"refresh_token\"
+  oauth_token_endpoint   Token endpoint URL (must be HTTPS)
+  oauth_access_token_env Override the env var name injected into the sandbox
+                         (defaults to <TYPE>_ACCESS_TOKEN)
+
+\x1b[1mOAUTH2 CREDENTIAL KEYS\x1b[0m
+  OAUTH_CLIENT_ID        OAuth2 client ID (required)
+  OAUTH_CLIENT_SECRET    OAuth2 client secret (required)
+  OAUTH_REFRESH_TOKEN    Refresh token (required for refresh_token grant)
 ";
 
 const GATEWAY_EXAMPLES: &str = "\x1b[1mALIAS\x1b[0m
@@ -612,6 +650,7 @@ enum CliProviderType {
     Openai,
     Anthropic,
     Nvidia,
+    Oauth2,
     Gitlab,
     Github,
     Outlook,
@@ -643,6 +682,7 @@ impl CliProviderType {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
             Self::Nvidia => "nvidia",
+            Self::Oauth2 => "oauth2",
             Self::Gitlab => "gitlab",
             Self::Github => "github",
             Self::Outlook => "outlook",
@@ -653,7 +693,7 @@ impl CliProviderType {
 #[derive(Subcommand, Debug)]
 enum ProviderCommands {
     /// Create a provider config.
-    #[command(group = clap::ArgGroup::new("cred_source").required(true).args(["from_existing", "credentials"]), help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    #[command(group = clap::ArgGroup::new("cred_source").required(true).args(["from_existing", "credentials"]), after_help = PROVIDER_CREATE_EXAMPLES, help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
     Create {
         /// Provider name.
         #[arg(long)]
