@@ -3334,7 +3334,15 @@ fn parse_credential_pairs(items: &[String]) -> Result<HashMap<String, String>> {
             if key.is_empty() {
                 return Err(miette::miette!("--credential key cannot be empty"));
             }
-            map.insert(key.to_string(), value.to_string());
+            // Support @path syntax: read file content as the credential value.
+            let value = if let Some(path) = value.strip_prefix('@') {
+                std::fs::read_to_string(path).map_err(|e| {
+                    miette::miette!("--credential {key}: failed to read file '{path}': {e}")
+                })?
+            } else {
+                value.to_string()
+            };
+            map.insert(key.to_string(), value);
             continue;
         }
 
@@ -3411,6 +3419,11 @@ pub async fn provider_create(
         ));
     }
 
+    // Auto-set auth_method for provider types that use server-side token exchange.
+    if provider_type == "gcp" {
+        config_map.entry("auth_method".to_string()).or_insert_with(|| "gcp".to_string());
+    }
+
     let response = client
         .create_provider(CreateProviderRequest {
             provider: Some(Provider {
@@ -3418,7 +3431,7 @@ pub async fn provider_create(
                 name: name.to_string(),
                 r#type: provider_type,
                 credentials: credential_map,
-                config: config_map,
+                config: config_map.clone(),
             }),
         })
         .await
@@ -3430,6 +3443,27 @@ pub async fn provider_create(
         .ok_or_else(|| miette::miette!("provider missing from response"))?;
 
     println!("{} Created provider {}", "✓".green().bold(), provider.name);
+
+    // Warn if GCP provider is missing recommended config.
+    if provider.r#type == "gcp" {
+        let mut missing = Vec::new();
+        if !config_map.contains_key("gcp_project") {
+            missing.push("  --config gcp_project=<your-project-id>");
+        }
+        if !config_map.contains_key("gcp_region") {
+            missing.push("  --config gcp_region=<your-region>");
+        }
+        if !missing.is_empty() {
+            eprintln!(
+                "\n{} GCP provider created but missing recommended config:\n{}\n  \
+                 Without these, sandbox tools may not know which Vertex AI endpoint to use.\n  \
+                 You can add them later with: openshell provider update {} --config KEY=VALUE",
+                "⚠".yellow().bold(),
+                missing.join("\n"),
+                provider.name,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3451,18 +3485,22 @@ pub async fn provider_get(server: &str, name: &str, tls: &TlsOptions) -> Result<
     let config_keys = provider.config.keys().cloned().collect::<Vec<_>>();
 
     // Derive auth method display.
-    let auth_display = if provider
-        .config
-        .get("auth_method")
-        .is_some_and(|v| v == "oauth2")
-    {
-        let grant = provider
-            .config
-            .get("oauth_grant_type")
-            .map_or("unknown", |v| v.as_str());
-        format!("OAuth2 ({grant})")
-    } else {
-        "Static".to_string()
+    let auth_display = match provider.config.get("auth_method").map(|v| v.as_str()) {
+        Some("oauth2") => {
+            let grant = provider
+                .config
+                .get("oauth_grant_type")
+                .map_or("unknown", |v| v.as_str());
+            format!("OAuth2 ({grant})")
+        }
+        Some("gcp") => {
+            if provider.credentials.contains_key("GCP_SERVICE_ACCOUNT_KEY") {
+                "GCP (service account)".to_string()
+            } else {
+                "GCP (application default credentials)".to_string()
+            }
+        }
+        _ => "Static".to_string(),
     };
 
     println!("{}", "Provider:".cyan().bold());

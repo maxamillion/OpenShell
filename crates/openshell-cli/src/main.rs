@@ -272,6 +272,10 @@ const PROVIDER_EXAMPLES: &str = "\x1b[1mEXAMPLES\x1b[0m
       --config auth_method=oauth2 --config oauth_grant_type=client_credentials \\
       --config oauth_token_endpoint=https://auth.example.com/oauth/token \\
       --credential OAUTH_CLIENT_ID=<id> --credential OAUTH_CLIENT_SECRET=<secret>
+  $ openshell provider create --name vertex --type gcp \\
+      --credential GCP_SERVICE_ACCOUNT_KEY=@sa-key.json \\
+      --config gcp_project=my-project --config gcp_region=us-east5
+  $ openshell provider create --name vertex --type gcp --from-existing
   $ openshell provider list
   $ openshell provider get openai
   $ openshell provider delete openai
@@ -297,6 +301,30 @@ const PROVIDER_CREATE_EXAMPLES: &str = "\x1b[1mEXAMPLES\x1b[0m
       --credential OAUTH_CLIENT_ID=<client-id> \\
       --credential OAUTH_CLIENT_SECRET=<client-secret> \\
       --credential OAUTH_REFRESH_TOKEN=<refresh-token>
+
+  Create a GCP Vertex AI provider (service account key):
+  $ openshell provider create --name vertex --type gcp \\
+      --credential GCP_SERVICE_ACCOUNT_KEY=@/path/to/sa-key.json \\
+      --config gcp_project=my-project \\
+      --config gcp_region=us-east5
+
+  Create a GCP Vertex AI provider (from gcloud state):
+  $ openshell provider create --name vertex --type gcp --from-existing
+
+\x1b[1mGCP CONFIG KEYS\x1b[0m
+  gcp_project   GCP project ID (injected as GOOGLE_CLOUD_PROJECT,
+                ANTHROPIC_VERTEX_PROJECT_ID, GCP_PROJECT_ID, etc.)
+  gcp_region    GCP region (injected as CLOUD_ML_REGION,
+                VERTEX_LOCATION, GCP_LOCATION, etc.)
+
+\x1b[1mGCP CREDENTIAL KEYS (service account)\x1b[0m
+  GCP_SERVICE_ACCOUNT_KEY   Service account JSON key file content
+                            (use @path syntax to read from file)
+
+\x1b[1mGCP CREDENTIAL KEYS (gcloud ADC)\x1b[0m
+  GCP_ADC_CLIENT_ID         OAuth2 client ID from gcloud ADC
+  GCP_ADC_CLIENT_SECRET     OAuth2 client secret from gcloud ADC
+  GCP_ADC_REFRESH_TOKEN     Refresh token from gcloud ADC
 
 \x1b[1mOAUTH2 CONFIG KEYS\x1b[0m
   auth_method            Must be \"oauth2\"
@@ -646,6 +674,7 @@ enum CliProviderType {
     Opencode,
     Codex,
     Copilot,
+    Gcp,
     Generic,
     Openai,
     Anthropic,
@@ -678,6 +707,7 @@ impl CliProviderType {
             Self::Opencode => "opencode",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Gcp => "gcp",
             Self::Generic => "generic",
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",

@@ -78,6 +78,7 @@ impl ProviderRegistry {
         registry.register(providers::claude::ClaudeProvider);
         registry.register(providers::codex::CodexProvider);
         registry.register(providers::copilot::CopilotProvider);
+        registry.register(providers::gcp::GcpProvider);
         registry.register(providers::opencode::OpencodeProvider);
         registry.register(providers::generic::GenericProvider);
         registry.register(providers::openai::OpenaiProvider);
@@ -132,6 +133,7 @@ pub fn normalize_provider_type(input: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "copilot" => Some("copilot"),
         "opencode" => Some("opencode"),
+        "gcp" | "gcloud" | "vertex" | "vertex-ai" | "vertexai" => Some("gcp"),
         "generic" => Some("generic"),
         "openai" => Some("openai"),
         "anthropic" => Some("anthropic"),

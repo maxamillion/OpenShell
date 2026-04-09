@@ -3681,23 +3681,40 @@ async fn resolve_provider_environment(
             .map_err(|e| Status::internal(format!("failed to fetch provider '{name}': {e}")))?
             .ok_or_else(|| Status::failed_precondition(format!("provider '{name}' not found")))?;
 
-        let is_oauth2 = crate::token_vending::is_oauth2_provider(&provider);
+        let provider_auth = crate::token_vending::auth_method(&provider);
 
-        // Handle OAuth2 token resolution.
-        if is_oauth2 {
+        // Handle token-vending providers (OAuth2 and GCP).
+        if crate::token_vending::is_token_vending_provider(&provider) {
             match token_vending.get_or_refresh(&provider).await {
                 Ok(result) => {
-                    let token_key = crate::token_vending::oauth_access_token_key(&provider);
-                    env.entry(token_key).or_insert(result.access_token);
+                    // Inject the access token into the env map.
+                    match provider_auth {
+                        crate::token_vending::AuthMethod::Gcp => {
+                            // GCP: inject access token + project/region aliases.
+                            let gcp_env = crate::token_vending::build_gcp_env(
+                                &provider,
+                                &result.access_token,
+                            );
+                            for (key, value) in gcp_env {
+                                env.entry(key).or_insert(value);
+                            }
+                        }
+                        _ => {
+                            // OAuth2: inject access token under derived key.
+                            let token_key =
+                                crate::token_vending::oauth_access_token_key(&provider);
+                            env.entry(token_key).or_insert(result.access_token);
+                        }
+                    }
 
                     // If the IdP returned a rotated refresh token, persist it.
-                    // We construct a Provider with empty `id` and `config`
-                    // because `update_provider_record` resolves by `name` (not
-                    // id) and `merge_map` treats empty maps as no-ops, so only
-                    // the credentials map is merged into the existing record.
                     if let Some(new_refresh) = result.new_refresh_token {
+                        let refresh_key = match provider_auth {
+                            crate::token_vending::AuthMethod::Gcp => "GCP_ADC_REFRESH_TOKEN",
+                            _ => "OAUTH_REFRESH_TOKEN",
+                        };
                         let mut updated_creds = std::collections::HashMap::new();
-                        updated_creds.insert("OAUTH_REFRESH_TOKEN".to_string(), new_refresh);
+                        updated_creds.insert(refresh_key.to_string(), new_refresh);
                         let updated = Provider {
                             id: String::new(),
                             name: provider.name.clone(),
@@ -3722,17 +3739,17 @@ async fn resolve_provider_environment(
                 }
                 Err(e) => {
                     return Err(Status::internal(format!(
-                        "OAuth2 token refresh failed for provider '{name}': {e}"
+                        "token refresh failed for provider '{name}': {e}"
                     )));
                 }
             }
         }
 
-        // Inject static credentials; skip OAuth2 internal keys only for
-        // OAuth2 providers so that a static provider using a credential key
-        // like "OAUTH_CLIENT_ID" is not accidentally suppressed.
+        // Inject static credentials; skip internal keys for token-vending
+        // providers so that long-lived secrets (private keys, client
+        // credentials, refresh tokens) are never injected into the sandbox.
         for (key, value) in &provider.credentials {
-            if is_oauth2 && crate::token_vending::is_oauth2_internal_credential(key) {
+            if crate::token_vending::is_internal_credential(&provider, key) {
                 continue;
             }
             if is_valid_env_key(key) {
@@ -4237,8 +4254,9 @@ async fn create_provider_record(
     // Validate field sizes before any I/O.
     validate_provider_fields(&provider)?;
 
-    // Validate OAuth2-specific configuration if present.
+    // Validate auth-method-specific configuration if present.
     crate::token_vending::validate_oauth2_config(&provider)?;
+    crate::token_vending::validate_gcp_config(&provider)?;
 
     let existing = store
         .get_message_by_name::<Provider>(&provider.name)
@@ -4353,9 +4371,10 @@ async fn update_provider_record(
 
     validate_provider_fields(&updated)?;
 
-    // Validate OAuth2-specific configuration on the merged result, so a
-    // user cannot add auth_method=oauth2 without the required credentials.
+    // Validate auth-method-specific configuration on the merged result, so a
+    // user cannot add auth_method=oauth2/gcp without the required credentials.
     crate::token_vending::validate_oauth2_config(&updated)?;
+    crate::token_vending::validate_gcp_config(&updated)?;
 
     store
         .put_message(&updated)

@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod claude;
+pub mod gcp;
 pub mod codex;
 pub mod copilot;
 pub mod generic;
