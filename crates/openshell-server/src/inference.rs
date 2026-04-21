@@ -69,7 +69,7 @@ impl Inference for InferenceService {
         &self,
         _request: Request<GetInferenceBundleRequest>,
     ) -> Result<Response<GetInferenceBundleResponse>, Status> {
-        resolve_inference_bundle(self.state.store.as_ref())
+        resolve_inference_bundle(self.state.store.as_ref(), &self.state.vertex_tokens)
             .await
             .map(Response::new)
     }
@@ -83,6 +83,7 @@ impl Inference for InferenceService {
         let verify = !req.no_verify;
         let route = upsert_cluster_inference_route(
             self.state.store.as_ref(),
+            &self.state.vertex_tokens,
             route_name,
             &req.provider_name,
             &req.model_id,
@@ -149,6 +150,7 @@ impl Inference for InferenceService {
 
 async fn upsert_cluster_inference_route(
     store: &Store,
+    vertex_tokens: &crate::vertex::VertexTokenCache,
     route_name: &str,
     provider_name: &str,
     model_id: &str,
@@ -170,7 +172,7 @@ async fn upsert_cluster_inference_route(
             Status::failed_precondition(format!("provider '{provider_name}' not found"))
         })?;
 
-    let resolved = resolve_provider_route(&provider)?;
+    let resolved = resolve_provider_route(vertex_tokens, &provider).await?;
     let validation = if verify {
         vec![verify_provider_endpoint(&provider.name, model_id, &resolved).await?]
     } else {
@@ -231,16 +233,23 @@ struct UpsertedInferenceRoute {
     validation: Vec<ValidatedEndpoint>,
 }
 
-fn resolve_provider_route(provider: &Provider) -> Result<ResolvedProviderRoute, Status> {
+async fn resolve_provider_route(
+    vertex_tokens: &crate::vertex::VertexTokenCache,
+    provider: &Provider,
+) -> Result<ResolvedProviderRoute, Status> {
     let provider_type = provider.r#type.trim().to_ascii_lowercase();
 
     let profile = openshell_core::inference::profile_for(&provider_type).ok_or_else(|| {
         Status::invalid_argument(format!(
             "provider '{name}' has unsupported type '{provider_type}' for cluster inference \
-                 (supported: openai, anthropic, nvidia)",
+                 (supported: openai, anthropic, nvidia, vertex)",
             name = provider.name
         ))
     })?;
+
+    if provider_type == "vertex" {
+        return resolve_vertex_provider_route(vertex_tokens, provider, profile).await;
+    }
 
     let api_key =
         find_provider_api_key(provider, profile.credential_key_names).ok_or_else(|| {
@@ -264,6 +273,63 @@ fn resolve_provider_route(provider: &Provider) -> Result<ResolvedProviderRoute, 
 
     Ok(ResolvedProviderRoute {
         provider_type,
+        route: RouterResolvedRoute {
+            name: provider.name.clone(),
+            endpoint: base_url,
+            model: String::new(),
+            api_key,
+            protocols: profile.protocols.iter().map(|p| (*p).to_string()).collect(),
+            auth: profile.auth.clone(),
+            default_headers: profile
+                .default_headers
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect(),
+            passthrough_headers: profile
+                .passthrough_headers
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            timeout: openshell_router::config::DEFAULT_ROUTE_TIMEOUT,
+        },
+    })
+}
+
+async fn resolve_vertex_provider_route(
+    vertex_tokens: &crate::vertex::VertexTokenCache,
+    provider: &Provider,
+    profile: &openshell_core::inference::InferenceProviderProfile,
+) -> Result<ResolvedProviderRoute, Status> {
+    let api_key = if let Some(token) =
+        find_provider_credential_value(provider, &["VERTEX_OAUTH_TOKEN", "VERTEX_ACCESS_TOKEN"])
+    {
+        token
+    } else {
+        crate::vertex::resolve_vertex_access_token(vertex_tokens, provider).await?
+    };
+
+    let base_url = if let Some(base_url) =
+        find_provider_config_value(provider, &["VERTEX_BASE_URL"])
+    {
+        base_url
+    } else {
+        let project_id = find_provider_credential_value(provider, &["ANTHROPIC_VERTEX_PROJECT_ID"])
+            .ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "provider '{}' is missing ANTHROPIC_VERTEX_PROJECT_ID required for Vertex AI",
+                    provider.name
+                ))
+            })?;
+        let region = find_provider_config_value(provider, &["ANTHROPIC_VERTEX_REGION"])
+            .or_else(|| find_provider_credential_value(provider, &["ANTHROPIC_VERTEX_REGION"]))
+            .unwrap_or_else(|| "us-central1".to_string());
+        format!(
+            "https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models"
+        )
+    };
+
+    Ok(ResolvedProviderRoute {
+        provider_type: "vertex".to_string(),
         route: RouterResolvedRoute {
             name: provider.name.clone(),
             endpoint: base_url,
@@ -351,12 +417,8 @@ async fn verify_provider_endpoint(
 }
 
 fn find_provider_api_key(provider: &Provider, preferred_key_names: &[&str]) -> Option<String> {
-    for key in preferred_key_names {
-        if let Some(value) = provider.credentials.get(*key)
-            && !value.trim().is_empty()
-        {
-            return Some(value.clone());
-        }
+    if let Some(value) = find_provider_credential_value(provider, preferred_key_names) {
+        return Some(value);
     }
 
     let mut keys = provider.credentials.keys().collect::<Vec<_>>();
@@ -372,6 +434,17 @@ fn find_provider_api_key(provider: &Provider, preferred_key_names: &[&str]) -> O
     None
 }
 
+fn find_provider_credential_value(provider: &Provider, preferred_keys: &[&str]) -> Option<String> {
+    for key in preferred_keys {
+        if let Some(value) = provider.credentials.get(*key)
+            && !value.trim().is_empty()
+        {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
 fn find_provider_config_value(provider: &Provider, preferred_keys: &[&str]) -> Option<String> {
     for key in preferred_keys {
         if let Some(value) = provider.config.get(*key)
@@ -384,12 +457,17 @@ fn find_provider_config_value(provider: &Provider, preferred_keys: &[&str]) -> O
 }
 
 /// Resolve the inference bundle (all managed routes + revision hash).
-async fn resolve_inference_bundle(store: &Store) -> Result<GetInferenceBundleResponse, Status> {
+async fn resolve_inference_bundle(
+    store: &Store,
+    vertex_tokens: &crate::vertex::VertexTokenCache,
+) -> Result<GetInferenceBundleResponse, Status> {
     let mut routes = Vec::new();
-    if let Some(r) = resolve_route_by_name(store, CLUSTER_INFERENCE_ROUTE_NAME).await? {
+    if let Some(r) =
+        resolve_route_by_name(store, vertex_tokens, CLUSTER_INFERENCE_ROUTE_NAME).await?
+    {
         routes.push(r);
     }
-    if let Some(r) = resolve_route_by_name(store, SANDBOX_SYSTEM_ROUTE_NAME).await? {
+    if let Some(r) = resolve_route_by_name(store, vertex_tokens, SANDBOX_SYSTEM_ROUTE_NAME).await? {
         routes.push(r);
     }
 
@@ -423,6 +501,7 @@ async fn resolve_inference_bundle(store: &Store) -> Result<GetInferenceBundleRes
 
 async fn resolve_route_by_name(
     store: &Store,
+    vertex_tokens: &crate::vertex::VertexTokenCache,
     route_name: &str,
 ) -> Result<Option<ResolvedRoute>, Status> {
     let route = store
@@ -461,7 +540,7 @@ async fn resolve_route_by_name(
             ))
         })?;
 
-    let resolved = resolve_provider_route(&provider)?;
+    let resolved = resolve_provider_route(vertex_tokens, &provider).await?;
 
     Ok(Some(ResolvedRoute {
         name: route_name.to_string(),
@@ -479,6 +558,10 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn vertex_tokens() -> crate::vertex::VertexTokenCache {
+        crate::vertex::new_vertex_token_cache()
+    }
 
     fn make_route(name: &str, provider_name: &str, model_id: &str) -> InferenceRoute {
         InferenceRoute {
@@ -522,6 +605,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store should connect");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
         store
@@ -531,6 +615,7 @@ mod tests {
 
         let first = upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             CLUSTER_INFERENCE_ROUTE_NAME,
             "openai-dev",
             "gpt-4o",
@@ -544,6 +629,7 @@ mod tests {
 
         let second = upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             CLUSTER_INFERENCE_ROUTE_NAME,
             "openai-dev",
             "gpt-4.1",
@@ -565,8 +651,9 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store should connect");
+        let vertex_tokens = vertex_tokens();
 
-        let route = resolve_route_by_name(&store, CLUSTER_INFERENCE_ROUTE_NAME)
+        let route = resolve_route_by_name(&store, &vertex_tokens, CLUSTER_INFERENCE_ROUTE_NAME)
             .await
             .expect("resolution should not fail");
         assert!(route.is_none());
@@ -577,6 +664,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
         store
@@ -587,7 +675,7 @@ mod tests {
         let route = make_route(CLUSTER_INFERENCE_ROUTE_NAME, "openai-dev", "mock/model-a");
         store.put_message(&route).await.expect("persist route");
 
-        let resp = resolve_inference_bundle(&store)
+        let resp = resolve_inference_bundle(&store, &vertex_tokens)
             .await
             .expect("bundle should resolve");
 
@@ -606,8 +694,9 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
-        let resp = resolve_inference_bundle(&store)
+        let resp = resolve_inference_bundle(&store, &vertex_tokens)
             .await
             .expect("bundle should resolve");
         assert!(resp.routes.is_empty());
@@ -618,6 +707,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
         store
@@ -632,10 +722,10 @@ mod tests {
         );
         store.put_message(&route).await.expect("persist route");
 
-        let resp1 = resolve_inference_bundle(&store)
+        let resp1 = resolve_inference_bundle(&store, &vertex_tokens)
             .await
             .expect("first resolve");
-        let resp2 = resolve_inference_bundle(&store)
+        let resp2 = resolve_inference_bundle(&store, &vertex_tokens)
             .await
             .expect("second resolve");
 
@@ -650,6 +740,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store should connect");
+        let vertex_tokens = vertex_tokens();
 
         let provider = Provider {
             id: "provider-1".to_string(),
@@ -683,7 +774,7 @@ mod tests {
             .await
             .expect("route should persist");
 
-        let managed = resolve_route_by_name(&store, CLUSTER_INFERENCE_ROUTE_NAME)
+        let managed = resolve_route_by_name(&store, &vertex_tokens, CLUSTER_INFERENCE_ROUTE_NAME)
             .await
             .expect("route should resolve")
             .expect("managed route should exist");
@@ -703,10 +794,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_vertex_route_constructs_base_url_from_project_and_region() {
+        let store = Store::connect("sqlite::memory:?cache=shared")
+            .await
+            .expect("store should connect");
+        let vertex_tokens = vertex_tokens();
+
+        let provider = Provider {
+            id: "provider-vertex".to_string(),
+            name: "vertex-dev".to_string(),
+            r#type: "vertex".to_string(),
+            credentials: [
+                (
+                    "ANTHROPIC_VERTEX_PROJECT_ID".to_string(),
+                    "my-gcp-project".to_string(),
+                ),
+                (
+                    "VERTEX_OAUTH_TOKEN".to_string(),
+                    "ya29.test-token".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            config: std::iter::once((
+                "ANTHROPIC_VERTEX_REGION".to_string(),
+                "us-east5".to_string(),
+            ))
+            .collect(),
+        };
+        store
+            .put_message(&provider)
+            .await
+            .expect("provider should persist");
+
+        let route = make_route(
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            "vertex-dev",
+            "claude-sonnet-4@20250514",
+        );
+        store
+            .put_message(&route)
+            .await
+            .expect("route should persist");
+
+        let managed = resolve_route_by_name(&store, &vertex_tokens, CLUSTER_INFERENCE_ROUTE_NAME)
+            .await
+            .expect("route should resolve")
+            .expect("managed route should exist");
+
+        assert_eq!(managed.provider_type, "vertex");
+        assert_eq!(managed.api_key, "ya29.test-token");
+        assert_eq!(
+            managed.base_url,
+            "https://us-east5-aiplatform.googleapis.com/v1/projects/my-gcp-project/locations/us-east5/publishers/anthropic/models"
+        );
+        assert_eq!(
+            managed.protocols,
+            vec![
+                "anthropic_messages".to_string(),
+                "model_discovery".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_managed_route_reflects_provider_key_rotation() {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store should connect");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-initial");
         store
@@ -720,7 +876,7 @@ mod tests {
             .await
             .expect("route should persist");
 
-        let first = resolve_route_by_name(&store, CLUSTER_INFERENCE_ROUTE_NAME)
+        let first = resolve_route_by_name(&store, &vertex_tokens, CLUSTER_INFERENCE_ROUTE_NAME)
             .await
             .expect("route should resolve")
             .expect("managed route should exist");
@@ -739,7 +895,7 @@ mod tests {
             .await
             .expect("provider rotation should persist");
 
-        let second = resolve_route_by_name(&store, CLUSTER_INFERENCE_ROUTE_NAME)
+        let second = resolve_route_by_name(&store, &vertex_tokens, CLUSTER_INFERENCE_ROUTE_NAME)
             .await
             .expect("route should resolve")
             .expect("managed route should exist");
@@ -751,12 +907,14 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("anthropic-dev", "anthropic", "ANTHROPIC_API_KEY", "sk-ant");
         store.put_message(&provider).await.expect("persist");
 
         let route = upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             SANDBOX_SYSTEM_ROUTE_NAME,
             "anthropic-dev",
             "claude-sonnet-4-20250514",
@@ -778,6 +936,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
         let openai = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-oai");
         store.put_message(&openai).await.expect("persist openai");
@@ -802,7 +961,7 @@ mod tests {
             .await
             .expect("persist system route");
 
-        let resp = resolve_inference_bundle(&store)
+        let resp = resolve_inference_bundle(&store, &vertex_tokens)
             .await
             .expect("bundle should resolve");
 
@@ -818,13 +977,14 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
         store.put_message(&provider).await.expect("persist");
         let system_route = make_route(SANDBOX_SYSTEM_ROUTE_NAME, "openai-dev", "gpt-4o-mini");
         store.put_message(&system_route).await.expect("persist");
 
-        let resp = resolve_inference_bundle(&store)
+        let resp = resolve_inference_bundle(&store, &vertex_tokens)
             .await
             .expect("bundle should resolve");
 
@@ -838,12 +998,14 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
 
         let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
         store.put_message(&provider).await.expect("persist");
 
         upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             SANDBOX_SYSTEM_ROUTE_NAME,
             "openai-dev",
             "gpt-4o-mini",
@@ -869,6 +1031,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
@@ -903,6 +1066,7 @@ mod tests {
 
         let route = upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             CLUSTER_INFERENCE_ROUTE_NAME,
             "openai-dev",
             "gpt-4o-mini",
@@ -922,6 +1086,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
@@ -945,6 +1110,7 @@ mod tests {
 
         let err = upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             CLUSTER_INFERENCE_ROUTE_NAME,
             "openai-dev",
             "gpt-4o-mini",
@@ -975,6 +1141,7 @@ mod tests {
         let store = Store::connect("sqlite::memory:?cache=shared")
             .await
             .expect("store");
+        let vertex_tokens = vertex_tokens();
         let provider = make_provider_with_base_url(
             "openai-dev",
             "openai",
@@ -990,6 +1157,7 @@ mod tests {
 
         let route = upsert_cluster_inference_route(
             &store,
+            &vertex_tokens,
             CLUSTER_INFERENCE_ROUTE_NAME,
             "openai-dev",
             "gpt-4o-mini",

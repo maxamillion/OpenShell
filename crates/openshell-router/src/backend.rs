@@ -157,7 +157,7 @@ fn prepare_backend_request(
     headers: &[(String, String)],
     body: bytes::Bytes,
 ) -> Result<(reqwest::RequestBuilder, String), RouterError> {
-    let url = build_backend_url(&route.endpoint, path);
+    let url = build_backend_url(&route.endpoint, path, &route.model);
     let headers = sanitize_request_headers(route, &headers);
 
     let reqwest_method: reqwest::Method = method
@@ -190,13 +190,18 @@ fn prepare_backend_request(
 
     // Set the "model" field in the JSON body to the route's configured model so the
     // backend receives the correct model ID regardless of what the client sent.
+    let is_vertex_endpoint = is_vertex_endpoint(&route.endpoint);
     let body = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(mut json) => {
             if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    "model".to_string(),
-                    serde_json::Value::String(route.model.clone()),
-                );
+                if is_vertex_endpoint {
+                    obj.remove("model");
+                } else {
+                    obj.insert(
+                        "model".to_string(),
+                        serde_json::Value::String(route.model.clone()),
+                    );
+                }
             }
             bytes::Bytes::from(serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec()))
         }
@@ -334,7 +339,7 @@ pub async fn verify_backend_endpoint(
 
     if mock::is_mock_route(route) {
         return Ok(ValidatedEndpoint {
-            url: build_backend_url(&route.endpoint, probe.path),
+            url: build_backend_url(&route.endpoint, probe.path, &route.model),
             protocol: probe.protocol.to_string(),
         });
     }
@@ -399,7 +404,7 @@ async fn try_validation_request(
                 details,
             },
         })?;
-    let url = build_backend_url(&route.endpoint, path);
+    let url = build_backend_url(&route.endpoint, path, &route.model);
 
     if response.status().is_success() {
         return Ok(ValidatedEndpoint {
@@ -512,8 +517,20 @@ pub async fn proxy_to_backend_streaming(
     })
 }
 
-fn build_backend_url(endpoint: &str, path: &str) -> String {
+fn is_vertex_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("aiplatform.googleapis.com")
+        || endpoint.contains("/publishers/anthropic/models")
+}
+
+fn build_backend_url(endpoint: &str, path: &str, model: &str) -> String {
     let base = endpoint.trim_end_matches('/');
+    if is_vertex_endpoint(base) && path == "/v1/messages" {
+        return if model.is_empty() {
+            format!("{base}:streamRawPredict")
+        } else {
+            format!("{base}/{model}:streamRawPredict")
+        };
+    }
     if base.ends_with("/v1") && (path == "/v1" || path.starts_with("/v1/")) {
         return format!("{base}{}", &path[3..]);
     }
@@ -532,7 +549,11 @@ mod tests {
     #[test]
     fn build_backend_url_dedupes_v1_prefix() {
         assert_eq!(
-            build_backend_url("https://api.openai.com/v1", "/v1/chat/completions"),
+            build_backend_url(
+                "https://api.openai.com/v1",
+                "/v1/chat/completions",
+                "gpt-4o"
+            ),
             "https://api.openai.com/v1/chat/completions"
         );
     }
@@ -540,15 +561,27 @@ mod tests {
     #[test]
     fn build_backend_url_preserves_non_versioned_base() {
         assert_eq!(
-            build_backend_url("https://api.anthropic.com", "/v1/messages"),
+            build_backend_url("https://api.anthropic.com", "/v1/messages", "claude-sonnet"),
             "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn build_backend_url_handles_vertex_messages_endpoint() {
+        assert_eq!(
+            build_backend_url(
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/publishers/anthropic/models",
+                "/v1/messages",
+                "claude-sonnet-4@20250514",
+            ),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict"
         );
     }
 
     #[test]
     fn build_backend_url_handles_exact_v1_path() {
         assert_eq!(
-            build_backend_url("https://api.openai.com/v1", "/v1"),
+            build_backend_url("https://api.openai.com/v1", "/v1", "gpt-4o"),
             "https://api.openai.com/v1"
         );
     }
@@ -793,5 +826,37 @@ mod tests {
             result.unwrap_err().kind,
             ValidationFailureKind::RequestShape
         );
+    }
+
+    #[tokio::test]
+    async fn verify_vertex_route_omits_model_from_request_body() {
+        let mock_server = MockServer::start().await;
+        let route = test_route(
+            &format!(
+                "{}/v1/projects/my-project/locations/us-central1/publishers/anthropic/models",
+                mock_server.uri()
+            ),
+            &["anthropic_messages"],
+            AuthHeader::Bearer,
+        );
+
+        Mock::given(method("POST"))
+            .and(path(
+                "/v1/projects/my-project/locations/us-central1/publishers/anthropic/models/test-model:streamRawPredict",
+            ))
+            .and(header("authorization", "Bearer sk-test"))
+            .and(body_partial_json(serde_json::json!({
+                "max_tokens": 32,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "msg_1"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::builder().build().unwrap();
+        let validated = verify_backend_endpoint(&client, &route).await.unwrap();
+
+        assert_eq!(validated.protocol, "anthropic_messages");
     }
 }

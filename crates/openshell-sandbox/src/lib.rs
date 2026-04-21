@@ -17,6 +17,7 @@ pub mod opa;
 mod policy;
 mod process;
 pub mod procfs;
+mod providers;
 pub mod proxy;
 mod sandbox;
 mod secrets;
@@ -300,6 +301,11 @@ pub async fn run_sandbox(
     } else {
         std::collections::HashMap::new()
     };
+
+    #[cfg(unix)]
+    if provider_env.contains_key("VERTEX_ADC") {
+        create_fake_vertex_adc(&policy)?;
+    }
 
     let (provider_env, secret_resolver) = SecretResolver::from_provider_env(provider_env);
     let secret_resolver = secret_resolver.map(Arc::new);
@@ -1749,7 +1755,12 @@ fn discover_policy_from_path(path: &std::path::Path) -> openshell_core::proto::S
 fn validate_sandbox_user(policy: &SandboxPolicy) -> Result<()> {
     use nix::unistd::User;
 
-    let user_name = policy.process.run_as_user.as_deref().unwrap_or("sandbox");
+    let user_name = policy
+        .process
+        .run_as_user
+        .as_deref()
+        .filter(|user_name| !user_name.is_empty())
+        .unwrap_or("sandbox");
 
     if user_name.is_empty() || user_name == "sandbox" {
         match User::from_name("sandbox") {
@@ -1775,6 +1786,62 @@ fn validate_sandbox_user(policy: &SandboxPolicy) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sandbox_user_home_uid_gid(
+    policy: &SandboxPolicy,
+) -> Result<(std::path::PathBuf, nix::unistd::Uid, nix::unistd::Gid)> {
+    use nix::unistd::{Group, User};
+
+    let user_name = policy.process.run_as_user.as_deref().unwrap_or("sandbox");
+    let user = User::from_name(user_name)
+        .into_diagnostic()?
+        .ok_or_else(|| miette::miette!("Sandbox user not found: {user_name}"))?;
+    let gid = if let Some(group_name) = policy
+        .process
+        .run_as_group
+        .as_deref()
+        .filter(|group_name| !group_name.is_empty())
+    {
+        Group::from_name(group_name)
+            .into_diagnostic()?
+            .ok_or_else(|| miette::miette!("Sandbox group not found: {group_name}"))?
+            .gid
+    } else {
+        user.gid
+    };
+
+    Ok((user.dir, user.uid, gid))
+}
+
+#[cfg(unix)]
+fn create_fake_vertex_adc(policy: &SandboxPolicy) -> Result<()> {
+    use nix::unistd::chown;
+    use std::os::unix::fs::PermissionsExt;
+
+    let (home, uid, gid) = sandbox_user_home_uid_gid(policy)?;
+    let config_dir = home.join(".config");
+    let gcloud_dir = config_dir.join("gcloud");
+    let adc_path = gcloud_dir.join("application_default_credentials.json");
+
+    std::fs::create_dir_all(&gcloud_dir).into_diagnostic()?;
+    std::fs::write(
+        &adc_path,
+        r#"{"type":"authorized_user","client_id":"openshell","client_secret":"openshell","refresh_token":"openshell"}"#,
+    )
+    .into_diagnostic()?;
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+        .into_diagnostic()?;
+    std::fs::set_permissions(&gcloud_dir, std::fs::Permissions::from_mode(0o700))
+        .into_diagnostic()?;
+    std::fs::set_permissions(&adc_path, std::fs::Permissions::from_mode(0o600))
+        .into_diagnostic()?;
+
+    chown(&config_dir, Some(uid), Some(gid)).into_diagnostic()?;
+    chown(&gcloud_dir, Some(uid), Some(gid)).into_diagnostic()?;
+    chown(&adc_path, Some(uid), Some(gid)).into_diagnostic()?;
     Ok(())
 }
 

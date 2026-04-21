@@ -660,6 +660,10 @@ fn session_user_and_home(policy: &SandboxPolicy) -> (String, String) {
     }
 }
 
+fn allow_child_provider_env_key(key: &str) -> bool {
+    key != "VERTEX_ADC" && key != "VERTEX_OAUTH_TOKEN" && !key.ends_with("_ACCESS_TOKEN")
+}
+
 fn apply_child_env(
     cmd: &mut Command,
     session_home: &str,
@@ -692,7 +696,9 @@ fn apply_child_env(
     }
 
     for (key, value) in provider_env {
-        cmd.env(key, value);
+        if allow_child_provider_env_key(key) {
+            cmd.env(key, value);
+        }
     }
 }
 

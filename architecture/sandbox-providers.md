@@ -3,7 +3,8 @@
 ## Overview
 
 OpenShell uses a first-class `Provider` entity to represent external tool credentials and
-configuration (for example `claude`, `gitlab`, `github`, `outlook`, `generic`, `nvidia`).
+configuration (for example `claude`, `gitlab`, `github`, `outlook`, `generic`, `nvidia`,
+and `vertex`).
 
 Providers exist as an abstraction layer for configuring tools that rely on third-party
 access. Rather than each tool managing its own credentials and service configuration,
@@ -60,7 +61,9 @@ The gRPC surface is defined in `proto/openshell.proto`:
 - `crates/openshell-sandbox`
   - sandbox supervisor fetches provider credentials via gRPC at startup,
   - injects placeholder env vars into entrypoint and SSH child processes,
-  - resolves placeholders back to real secrets in the outbound proxy path.
+  - direct-injects select non-secret Vertex metadata into child env,
+  - resolves placeholders back to real secrets in the outbound proxy path,
+  - intercepts the Vertex OAuth token exchange used by Claude Code.
 
 ## Provider Plugins
 
@@ -95,6 +98,7 @@ pub trait ProviderPlugin: Send + Sync {
 | `gitlab.rs` | `GITLAB_TOKEN`, `GLAB_TOKEN`, `CI_JOB_TOKEN` | `~/.config/glab-cli/config.yml` |
 | `github.rs` | `GITHUB_TOKEN`, `GH_TOKEN` | `~/.config/gh/hosts.yml` |
 | `outlook.rs` | *(none)* | *(none)* |
+| `vertex.rs` | `ANTHROPIC_VERTEX_PROJECT_ID`, `VERTEX_ADC`, `CLAUDE_CODE_USE_VERTEX` | `~/.config/gcloud/application_default_credentials.json` |
 
 `generic` and `outlook` are stubs — `discover_existing()` always returns `None`.
 
@@ -105,7 +109,7 @@ each provider module.
 ### Normalization
 
 `normalize_provider_type()` maps common aliases to canonical slugs: `"glab"` -> `"gitlab"`,
-`"gh"` -> `"github"`, and accepts `"generic"` directly as a first-class type.
+`"gh"` -> `"github"`, and accepts `"generic"` and `"vertex"` directly as first-class types.
 `detect_provider_from_command()` extracts the file basename from the first command token
 and passes it through normalization.
 
@@ -221,7 +225,7 @@ them at runtime via the `GetSandboxProviderEnvironment` gRPC call.
 environment map returned by `GetSandboxProviderEnvironment`:
 
 1. for each provider name in `spec.providers`, fetch the provider from the store,
-2. iterate over `provider.credentials` only (not `config`),
+2. iterate over `provider.credentials`,
 3. validate each key matches `^[A-Za-z_][A-Za-z0-9_]*$` (valid env var name),
 4. insert into result map using `entry().or_insert()` — first provider's value wins
    when duplicate keys appear across providers,
@@ -229,9 +233,12 @@ environment map returned by `GetSandboxProviderEnvironment`:
 
 Key behaviors:
 
-- Only `credentials` are injected, not `config`.
+- Most providers inject only `credentials`. `vertex` is the exception: the gateway also
+  projects `ANTHROPIC_VERTEX_REGION` from provider `config` into the runtime env.
 - Invalid env var keys (containing `.`, `-`, spaces, etc.) are skipped.
 - Credentials are never persisted in the sandbox spec's environment map.
+- `vertex` providers also resolve a fresh `VERTEX_ACCESS_TOKEN` from stored ADC JSON and
+  return it alongside `VERTEX_ADC` for supervisor-only use.
 
 ### Sandbox Supervisor: Fetching Credentials
 
@@ -253,6 +260,16 @@ The returned `provider_env` `HashMap<String, String>` is immediately transformed
 
 The placeholder env map is threaded to the entrypoint process spawner and SSH server.
 The registry is threaded to the proxy so it can rewrite outbound headers.
+
+`vertex` adds a split projection model:
+
+- `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_VERTEX_REGION`, and
+  `CLAUDE_CODE_USE_VERTEX=1` are injected into child processes as real values because
+  Claude Code reads them directly.
+- `VERTEX_ADC`, `VERTEX_OAUTH_TOKEN`, and `*_ACCESS_TOKEN` values stay supervisor-only.
+- when `VERTEX_ADC` is present, the supervisor creates a fake
+  `~/.config/gcloud/application_default_credentials.json` owned by the sandbox user so
+  Google SDK path checks succeed without exposing the real refresh-token JSON.
 
 ### Child Process Environment Variable Injection
 
@@ -331,6 +348,12 @@ The real secret value remains in supervisor memory only; it is not re-injected i
 child process environment. See [Credential injection](sandbox.md#credential-injection) for
 the full implementation details, encoding rules, and security properties.
 
+For Vertex/Claude compatibility, the TLS-terminated REST path also intercepts
+`POST https://oauth2.googleapis.com/token` and returns a success-shaped OAuth response
+containing the supervisor-resolved `VERTEX_ACCESS_TOKEN`. This lets Claude Code complete
+its normal Google ADC flow while keeping the refresh-token JSON and live access token out
+of the child environment.
+
 ### End-to-End Flow
 
 ```
@@ -393,6 +416,7 @@ Providers are stored with `object_type = "provider"` in the shared object store.
 - Mocked discovery context tests cover env and path-based behavior.
 - CLI and gateway integration tests validate end-to-end RPC compatibility.
 - `resolve_provider_environment` unit tests in `crates/openshell-server/src/grpc.rs`.
-- sandbox unit tests validate placeholder generation and header rewriting.
+- sandbox unit tests validate placeholder generation, Vertex direct-inject filtering,
+  fake ADC support, OAuth interception, and header rewriting.
 - E2E sandbox tests verify placeholders are visible in child env, outbound proxy traffic
   is rewritten with the real secret, and the SSH handshake secret is absent from exec env.

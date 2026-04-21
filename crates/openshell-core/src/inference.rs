@@ -94,6 +94,17 @@ static NVIDIA_PROFILE: InferenceProviderProfile = InferenceProviderProfile {
     passthrough_headers: &["x-model-id"],
 };
 
+static VERTEX_PROFILE: InferenceProviderProfile = InferenceProviderProfile {
+    provider_type: "vertex",
+    default_base_url: "https://us-central1-aiplatform.googleapis.com/v1",
+    protocols: ANTHROPIC_PROTOCOLS,
+    credential_key_names: &["VERTEX_OAUTH_TOKEN", "VERTEX_ACCESS_TOKEN"],
+    base_url_config_keys: &["VERTEX_BASE_URL", "ANTHROPIC_VERTEX_REGION"],
+    auth: AuthHeader::Bearer,
+    default_headers: &[("anthropic-version", "vertex-2023-10-16")],
+    passthrough_headers: &["anthropic-version", "anthropic-beta"],
+};
+
 /// Look up the inference provider profile for a given provider type.
 ///
 /// Returns `None` for provider types that don't support inference routing
@@ -103,6 +114,7 @@ pub fn profile_for(provider_type: &str) -> Option<&'static InferenceProviderProf
         "openai" => Some(&OPENAI_PROFILE),
         "anthropic" => Some(&ANTHROPIC_PROFILE),
         "nvidia" => Some(&NVIDIA_PROFILE),
+        "vertex" => Some(&VERTEX_PROFILE),
         _ => None,
     }
 }
@@ -200,6 +212,7 @@ mod tests {
         assert!(profile_for("openai").is_some());
         assert!(profile_for("anthropic").is_some());
         assert!(profile_for("nvidia").is_some());
+        assert!(profile_for("vertex").is_some());
         assert!(profile_for("OpenAI").is_some()); // case insensitive
     }
 
@@ -235,6 +248,22 @@ mod tests {
             passthrough_headers
                 .iter()
                 .any(|name| name == "anthropic-version")
+        );
+        assert!(
+            passthrough_headers
+                .iter()
+                .any(|name| name == "anthropic-beta")
+        );
+    }
+
+    #[test]
+    fn route_headers_for_vertex_include_anthropic_passthrough_headers() {
+        let (auth, headers, passthrough_headers) = route_headers_for_provider_type("vertex");
+        assert_eq!(auth, AuthHeader::Bearer);
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| name == "anthropic-version" && value == "vertex-2023-10-16")
         );
         assert!(
             passthrough_headers

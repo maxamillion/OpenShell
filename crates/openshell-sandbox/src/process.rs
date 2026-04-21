@@ -24,9 +24,15 @@ use tracing::debug;
 
 const SSH_HANDSHAKE_SECRET_ENV: &str = "OPENSHELL_SSH_HANDSHAKE_SECRET";
 
+fn allow_child_provider_env_key(key: &str) -> bool {
+    key != "VERTEX_ADC" && key != "VERTEX_OAUTH_TOKEN" && !key.ends_with("_ACCESS_TOKEN")
+}
+
 fn inject_provider_env(cmd: &mut Command, provider_env: &HashMap<String, String>) {
     for (key, value) in provider_env {
-        cmd.env(key, value);
+        if allow_child_provider_env_key(key) {
+            cmd.env(key, value);
+        }
     }
 }
 
@@ -833,5 +839,32 @@ mod tests {
         let output = cmd.output().await.expect("spawn env");
         let stdout = String::from_utf8(output.stdout).expect("utf8");
         assert!(stdout.contains("ANTHROPIC_API_KEY=openshell:resolve:env:ANTHROPIC_API_KEY"));
+    }
+
+    #[tokio::test]
+    async fn inject_provider_env_filters_vertex_supervisor_only_values() {
+        let mut cmd = Command::new("/usr/bin/env");
+        cmd.stdin(StdStdio::null())
+            .stdout(StdStdio::piped())
+            .stderr(StdStdio::null());
+
+        let provider_env = [
+            ("VERTEX_ADC".to_string(), "{}".to_string()),
+            ("VERTEX_ACCESS_TOKEN".to_string(), "ya29.test".to_string()),
+            (
+                "ANTHROPIC_VERTEX_PROJECT_ID".to_string(),
+                "my-gcp-project".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        inject_provider_env(&mut cmd, &provider_env);
+
+        let output = cmd.output().await.expect("spawn env");
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+        assert!(!stdout.contains("VERTEX_ADC="));
+        assert!(!stdout.contains("VERTEX_ACCESS_TOKEN="));
+        assert!(stdout.contains("ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project"));
     }
 }

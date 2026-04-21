@@ -12,7 +12,7 @@ use crate::secrets::rewrite_http_header_block;
 use miette::{IntoDiagnostic, Result, miette};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, warn};
+use tracing::debug;
 
 const MAX_HEADER_BYTES: usize = 16384; // 16 KiB for HTTP headers
 const RELAY_BUF_SIZE: usize = 8192;
@@ -338,6 +338,15 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
+    if let Some(host) = request_host(&req.raw_header)
+        && crate::providers::vertex::should_intercept_oauth_request(&req.action, &host, &req.target)
+    {
+        let response = crate::providers::vertex::oauth_intercept_response(resolver);
+        client.write_all(&response).await.into_diagnostic()?;
+        client.flush().await.into_diagnostic()?;
+        return Ok(RelayOutcome::Consumed);
+    }
+
     let header_end = req
         .raw_header
         .windows(4)
@@ -412,6 +421,18 @@ where
     }
 
     Ok(outcome)
+}
+
+fn request_host(raw_header: &[u8]) -> Option<String> {
+    let header_str = String::from_utf8_lossy(raw_header);
+    header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("host") {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Send a 403 Forbidden JSON deny response.
@@ -1995,6 +2016,46 @@ mod tests {
 
         assert!(rewritten.contains("Authorization: Bearer sk-test\r\n"));
         assert!(!rewritten.contains("openshell:resolve:env:ANTHROPIC_API_KEY"));
+    }
+
+    #[tokio::test]
+    async fn relay_intercepts_vertex_oauth_exchange() {
+        let (_, resolver) = SecretResolver::from_provider_env(
+            [("VERTEX_ACCESS_TOKEN".to_string(), "ya29.test".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let (mut proxy_to_upstream, _upstream_side) = tokio::io::duplex(8192);
+        let (mut app_side, mut proxy_to_client) = tokio::io::duplex(8192);
+
+        let req = L7Request {
+            action: "POST".to_string(),
+            target: "/token".to_string(),
+            query_params: HashMap::new(),
+            raw_header:
+                b"POST /token HTTP/1.1\r\nHost: oauth2.googleapis.com\r\nContent-Length: 0\r\n\r\n"
+                    .to_vec(),
+            body_length: BodyLength::ContentLength(0),
+        };
+
+        let outcome = relay_http_request_with_resolver(
+            &req,
+            &mut proxy_to_client,
+            &mut proxy_to_upstream,
+            resolver.as_ref(),
+        )
+        .await
+        .expect("relay should succeed");
+        assert!(matches!(outcome, RelayOutcome::Consumed));
+
+        let mut buf = vec![0u8; 512];
+        let n = app_side
+            .read(&mut buf)
+            .await
+            .expect("client should read response");
+        let response = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"access_token\":\"ya29.test\""));
     }
 
     /// Verifies that `relay_http_request_with_resolver` rewrites credential

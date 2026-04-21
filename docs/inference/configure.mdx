@@ -82,6 +82,25 @@ This reads `ANTHROPIC_API_KEY` from your environment.
 
 </Tab>
 
+<Tab title="Vertex AI">
+
+```shell
+gcloud auth application-default login
+
+export ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+export ANTHROPIC_VERTEX_REGION=us-central1
+
+openshell provider create --name vertex-prod --type vertex --from-existing
+```
+
+This reads `ANTHROPIC_VERTEX_PROJECT_ID`, optional
+`ANTHROPIC_VERTEX_REGION`, and Google Application Default Credentials from
+`VERTEX_ADC` or `~/.config/gcloud/application_default_credentials.json`.
+OpenShell refreshes the short-lived Vertex bearer token automatically when it
+builds the managed route.
+
+</Tab>
+
 </Tabs>
 
 ## Set Inference Routing
@@ -104,6 +123,20 @@ openshell inference set \
 ```
 
 The value is in seconds. When `--timeout` is omitted (or set to `0`), the default of 60 seconds applies. Increase `--timeout` when you expect extended thinking phases so the full response completes before the request deadline.
+
+For Vertex AI, use the Anthropic model identifier without a base URL:
+
+```shell
+openshell inference set \
+    --provider vertex-prod \
+    --model claude-sonnet-4@20250514
+```
+
+The gateway constructs the Vertex endpoint from
+`ANTHROPIC_VERTEX_PROJECT_ID` and `ANTHROPIC_VERTEX_REGION`, rewrites
+`/v1/messages` requests to Vertex's
+`.../publishers/anthropic/models/<model>:streamRawPredict` path, and injects
+the required `anthropic-version: vertex-2023-10-16` header.
 
 ## Verify the Active Config
 

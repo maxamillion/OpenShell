@@ -3152,6 +3152,7 @@ name = "openshell-providers"
 version = "0.0.0"
 dependencies = [
  "openshell-core",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

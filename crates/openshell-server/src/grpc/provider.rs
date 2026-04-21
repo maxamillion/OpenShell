@@ -189,6 +189,7 @@ fn merge_map(
 /// first provider's value wins.
 pub(super) async fn resolve_provider_environment(
     store: &Store,
+    vertex_tokens: &crate::vertex::VertexTokenCache,
     provider_names: &[String],
 ) -> Result<std::collections::HashMap<String, String>, Status> {
     if provider_names.is_empty() {
@@ -204,20 +205,76 @@ pub(super) async fn resolve_provider_environment(
             .map_err(|e| Status::internal(format!("failed to fetch provider '{name}': {e}")))?
             .ok_or_else(|| Status::failed_precondition(format!("provider '{name}' not found")))?;
 
-        for (key, value) in &provider.credentials {
-            if is_valid_env_key(key) {
-                env.entry(key.clone()).or_insert_with(|| value.clone());
-            } else {
-                warn!(
-                    provider_name = %name,
-                    key = %key,
-                    "skipping credential with invalid env var key"
-                );
-            }
+        if provider.r#type.eq_ignore_ascii_case("vertex") {
+            collect_vertex_provider_environment(&mut env, vertex_tokens, &provider).await?;
+        } else {
+            collect_provider_credentials(&mut env, &provider.credentials, name);
         }
     }
 
     Ok(env)
+}
+
+fn collect_provider_credentials(
+    env: &mut std::collections::HashMap<String, String>,
+    credentials: &std::collections::HashMap<String, String>,
+    provider_name: &str,
+) {
+    for (key, value) in credentials {
+        insert_env_var(env, provider_name, key, value);
+    }
+}
+
+async fn collect_vertex_provider_environment(
+    env: &mut std::collections::HashMap<String, String>,
+    vertex_tokens: &crate::vertex::VertexTokenCache,
+    provider: &Provider,
+) -> Result<(), Status> {
+    for (key, value) in &provider.credentials {
+        if key == "VERTEX_OAUTH_TOKEN" || key == "VERTEX_ACCESS_TOKEN" {
+            continue;
+        }
+        insert_env_var(env, &provider.name, key, value);
+    }
+
+    if let Some(region) = provider
+        .config
+        .get("ANTHROPIC_VERTEX_REGION")
+        .filter(|value| !value.trim().is_empty())
+    {
+        insert_env_var(env, &provider.name, "ANTHROPIC_VERTEX_REGION", region);
+    }
+
+    let access_token = if let Some(token) = provider
+        .credentials
+        .get("VERTEX_OAUTH_TOKEN")
+        .or_else(|| provider.credentials.get("VERTEX_ACCESS_TOKEN"))
+        .filter(|value| !value.trim().is_empty())
+    {
+        token.clone()
+    } else {
+        crate::vertex::resolve_vertex_access_token(vertex_tokens, provider).await?
+    };
+    insert_env_var(env, &provider.name, "VERTEX_ACCESS_TOKEN", &access_token);
+    Ok(())
+}
+
+fn insert_env_var(
+    env: &mut std::collections::HashMap<String, String>,
+    provider_name: &str,
+    key: &str,
+    value: &str,
+) {
+    if is_valid_env_key(key) {
+        env.entry(key.to_string())
+            .or_insert_with(|| value.to_string());
+    } else {
+        warn!(
+            provider_name = %provider_name,
+            key = %key,
+            "skipping credential with invalid env var key"
+        );
+    }
 }
 
 pub(super) fn is_valid_env_key(key: &str) -> bool {
@@ -338,6 +395,10 @@ mod tests {
     use crate::grpc::MAX_MAP_KEY_LEN;
     use std::collections::HashMap;
     use tonic::Code;
+
+    fn vertex_tokens() -> crate::vertex::VertexTokenCache {
+        crate::vertex::new_vertex_token_cache()
+    }
 
     #[test]
     fn env_key_validation_accepts_valid_keys() {
@@ -675,13 +736,17 @@ mod tests {
     #[tokio::test]
     async fn resolve_provider_env_empty_list_returns_empty() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        let result = resolve_provider_environment(&store, &[]).await.unwrap();
+        let vertex_tokens = vertex_tokens();
+        let result = resolve_provider_environment(&store, &vertex_tokens, &[])
+            .await
+            .unwrap();
         assert!(result.is_empty());
     }
 
     #[tokio::test]
     async fn resolve_provider_env_injects_credentials() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
         let provider = Provider {
             id: String::new(),
             name: "claude-local".to_string(),
@@ -700,20 +765,78 @@ mod tests {
         };
         create_provider_record(&store, provider).await.unwrap();
 
-        let result = resolve_provider_environment(&store, &["claude-local".to_string()])
-            .await
-            .unwrap();
+        let result =
+            resolve_provider_environment(&store, &vertex_tokens, &["claude-local".to_string()])
+                .await
+                .unwrap();
         assert_eq!(result.get("ANTHROPIC_API_KEY"), Some(&"sk-abc".to_string()));
         assert_eq!(result.get("CLAUDE_API_KEY"), Some(&"sk-abc".to_string()));
         assert!(!result.contains_key("endpoint"));
     }
 
     #[tokio::test]
+    async fn resolve_provider_env_projects_vertex_supervisor_values() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
+        let provider = Provider {
+            id: String::new(),
+            name: "vertex-local".to_string(),
+            r#type: "vertex".to_string(),
+            credentials: [
+                (
+                    "ANTHROPIC_VERTEX_PROJECT_ID".to_string(),
+                    "my-gcp-project".to_string(),
+                ),
+                (
+                    "VERTEX_ADC".to_string(),
+                    "{\"type\":\"authorized_user\"}".to_string(),
+                ),
+                ("CLAUDE_CODE_USE_VERTEX".to_string(), "1".to_string()),
+                ("VERTEX_OAUTH_TOKEN".to_string(), "ya29.test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            config: std::iter::once((
+                "ANTHROPIC_VERTEX_REGION".to_string(),
+                "us-east5".to_string(),
+            ))
+            .collect(),
+        };
+        create_provider_record(&store, provider).await.unwrap();
+
+        let result =
+            resolve_provider_environment(&store, &vertex_tokens, &["vertex-local".to_string()])
+                .await
+                .unwrap();
+
+        assert_eq!(
+            result.get("ANTHROPIC_VERTEX_PROJECT_ID"),
+            Some(&"my-gcp-project".to_string())
+        );
+        assert_eq!(
+            result.get("ANTHROPIC_VERTEX_REGION"),
+            Some(&"us-east5".to_string())
+        );
+        assert_eq!(result.get("CLAUDE_CODE_USE_VERTEX"), Some(&"1".to_string()));
+        assert_eq!(
+            result.get("VERTEX_ADC"),
+            Some(&"{\"type\":\"authorized_user\"}".to_string())
+        );
+        assert_eq!(
+            result.get("VERTEX_ACCESS_TOKEN"),
+            Some(&"ya29.test".to_string())
+        );
+        assert!(!result.contains_key("VERTEX_OAUTH_TOKEN"));
+    }
+
+    #[tokio::test]
     async fn resolve_provider_env_unknown_name_returns_error() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        let err = resolve_provider_environment(&store, &["nonexistent".to_string()])
-            .await
-            .unwrap_err();
+        let vertex_tokens = vertex_tokens();
+        let err =
+            resolve_provider_environment(&store, &vertex_tokens, &["nonexistent".to_string()])
+                .await
+                .unwrap_err();
         assert_eq!(err.code(), Code::FailedPrecondition);
         assert!(err.message().contains("nonexistent"));
     }
@@ -721,6 +844,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_provider_env_skips_invalid_credential_keys() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
         let provider = Provider {
             id: String::new(),
             name: "test-provider".to_string(),
@@ -736,9 +860,10 @@ mod tests {
         };
         create_provider_record(&store, provider).await.unwrap();
 
-        let result = resolve_provider_environment(&store, &["test-provider".to_string()])
-            .await
-            .unwrap();
+        let result =
+            resolve_provider_environment(&store, &vertex_tokens, &["test-provider".to_string()])
+                .await
+                .unwrap();
         assert_eq!(result.get("VALID_KEY"), Some(&"value".to_string()));
         assert!(!result.contains_key("nested.api_key"));
         assert!(!result.contains_key("bad-key"));
@@ -747,6 +872,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_provider_env_multiple_providers_merge() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
         create_provider_record(
             &store,
             Provider {
@@ -779,6 +905,7 @@ mod tests {
 
         let result = resolve_provider_environment(
             &store,
+            &vertex_tokens,
             &["claude-local".to_string(), "gitlab-local".to_string()],
         )
         .await
@@ -790,6 +917,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_provider_env_first_credential_wins_on_duplicate_key() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
         create_provider_record(
             &store,
             Provider {
@@ -822,6 +950,7 @@ mod tests {
 
         let result = resolve_provider_environment(
             &store,
+            &vertex_tokens,
             &["provider-a".to_string(), "provider-b".to_string()],
         )
         .await
@@ -834,6 +963,7 @@ mod tests {
         use openshell_core::proto::{Sandbox, SandboxPhase, SandboxSpec};
 
         let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
 
         create_provider_record(
             &store,
@@ -872,7 +1002,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let spec = loaded.spec.unwrap();
-        let env = resolve_provider_environment(&store, &spec.providers)
+        let env = resolve_provider_environment(&store, &vertex_tokens, &spec.providers)
             .await
             .unwrap();
 
@@ -884,6 +1014,7 @@ mod tests {
         use openshell_core::proto::{Sandbox, SandboxPhase, SandboxSpec};
 
         let store = Store::connect("sqlite::memory:").await.unwrap();
+        let vertex_tokens = vertex_tokens();
 
         let sandbox = Sandbox {
             id: "sandbox-002".to_string(),
@@ -902,7 +1033,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let spec = loaded.spec.unwrap();
-        let env = resolve_provider_environment(&store, &spec.providers)
+        let env = resolve_provider_environment(&store, &vertex_tokens, &spec.providers)
             .await
             .unwrap();
 

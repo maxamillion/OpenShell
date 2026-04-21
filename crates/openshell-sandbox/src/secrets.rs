@@ -10,6 +10,12 @@ const PLACEHOLDER_PREFIX: &str = "openshell:resolve:env:";
 /// Public access to the placeholder prefix for fail-closed scanning in other modules.
 pub(crate) const PLACEHOLDER_PREFIX_PUBLIC: &str = PLACEHOLDER_PREFIX;
 
+const DIRECT_INJECT_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "ANTHROPIC_VERTEX_REGION",
+    "CLAUDE_CODE_USE_VERTEX",
+];
+
 /// Characters that are valid in an env var key name (used to extract
 /// placeholder boundaries within concatenated strings like path segments).
 fn is_env_key_char(b: u8) -> bool {
@@ -78,9 +84,16 @@ impl SecretResolver {
         let mut by_placeholder = HashMap::with_capacity(provider_env.len());
 
         for (key, value) in provider_env {
+            if should_direct_inject(&key) {
+                child_env.insert(key, value);
+                continue;
+            }
+
             let placeholder = placeholder_for_env_key(&key);
-            child_env.insert(key, placeholder.clone());
             by_placeholder.insert(placeholder, value);
+            if !should_hide_from_child_env(&key) {
+                child_env.insert(key.clone(), placeholder_for_env_key(&key));
+            }
         }
 
         (child_env, Some(Self { by_placeholder }))
@@ -170,6 +183,14 @@ impl SecretResolver {
 
         Some(b64.encode(rewritten.as_bytes()))
     }
+}
+
+fn should_direct_inject(key: &str) -> bool {
+    DIRECT_INJECT_ENV_VARS.contains(&key)
+}
+
+fn should_hide_from_child_env(key: &str) -> bool {
+    key == "VERTEX_ADC" || key == "VERTEX_OAUTH_TOKEN" || key.ends_with("_ACCESS_TOKEN")
 }
 
 pub(crate) fn placeholder_for_env_key(key: &str) -> String {
@@ -718,6 +739,71 @@ mod tests {
                 .and_then(|resolver| resolver
                     .resolve_placeholder("openshell:resolve:env:ANTHROPIC_API_KEY")),
             Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn vertex_project_metadata_is_directly_injected() {
+        let (child_env, resolver) = SecretResolver::from_provider_env(
+            [
+                (
+                    "ANTHROPIC_VERTEX_PROJECT_ID".to_string(),
+                    "my-gcp-project".to_string(),
+                ),
+                (
+                    "ANTHROPIC_VERTEX_REGION".to_string(),
+                    "us-east5".to_string(),
+                ),
+                ("CLAUDE_CODE_USE_VERTEX".to_string(), "1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            child_env.get("ANTHROPIC_VERTEX_PROJECT_ID"),
+            Some(&"my-gcp-project".to_string())
+        );
+        assert_eq!(
+            child_env.get("ANTHROPIC_VERTEX_REGION"),
+            Some(&"us-east5".to_string())
+        );
+        assert_eq!(
+            child_env.get("CLAUDE_CODE_USE_VERTEX"),
+            Some(&"1".to_string())
+        );
+        assert!(
+            resolver
+                .expect("resolver")
+                .resolve_placeholder("openshell:resolve:env:ANTHROPIC_VERTEX_PROJECT_ID")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn vertex_adc_and_access_tokens_stay_supervisor_only() {
+        let (child_env, resolver) = SecretResolver::from_provider_env(
+            [
+                (
+                    "VERTEX_ADC".to_string(),
+                    "{\"type\":\"authorized_user\"}".to_string(),
+                ),
+                ("VERTEX_ACCESS_TOKEN".to_string(), "ya29.test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let resolver = resolver.expect("resolver");
+
+        assert!(!child_env.contains_key("VERTEX_ADC"));
+        assert!(!child_env.contains_key("VERTEX_ACCESS_TOKEN"));
+        assert_eq!(
+            resolver.resolve_placeholder("openshell:resolve:env:VERTEX_ADC"),
+            Some("{\"type\":\"authorized_user\"}")
+        );
+        assert_eq!(
+            resolver.resolve_placeholder("openshell:resolve:env:VERTEX_ACCESS_TOKEN"),
+            Some("ya29.test")
         );
     }
 

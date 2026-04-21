@@ -33,6 +33,7 @@ mod ssh_tunnel;
 pub mod supervisor_session;
 mod tls;
 pub mod tracing_bus;
+mod vertex;
 mod ws_tunnel;
 
 use openshell_core::{ComputeDriverKind, Config, Error, Result};
@@ -89,6 +90,9 @@ pub struct ServerState {
 
     /// Registry of active supervisor sessions and pending relay channels.
     pub supervisor_sessions: supervisor_session::SupervisorSessionRegistry,
+
+    /// Cached Vertex OAuth tokens keyed by provider name.
+    pub(crate) vertex_tokens: vertex::VertexTokenCache,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -120,6 +124,7 @@ impl ServerState {
             ssh_connections_by_sandbox: Mutex::new(HashMap::new()),
             settings_mutex: tokio::sync::Mutex::new(()),
             supervisor_sessions: supervisor_session::SupervisorSessionRegistry::new(),
+            vertex_tokens: vertex::new_vertex_token_cache(),
         }
     }
 }

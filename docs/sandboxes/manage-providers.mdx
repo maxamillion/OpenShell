@@ -106,6 +106,26 @@ openshell sandbox create -- claude
 This detects `claude` as a known tool, finds your `ANTHROPIC_API_KEY`, creates
 a provider, attaches it to the sandbox, and launches Claude Code.
 
+### Vertex AI from Local ADC
+
+Use the `vertex` provider type when you want Claude Code inside the sandbox to
+authenticate through Google Cloud Vertex AI.
+
+```shell
+gcloud auth application-default login
+
+export ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+export ANTHROPIC_VERTEX_REGION=us-central1
+
+openshell provider create --name my-vertex --type vertex --from-existing
+```
+
+`--from-existing` reads:
+
+- `ANTHROPIC_VERTEX_PROJECT_ID`
+- `ANTHROPIC_VERTEX_REGION` when set
+- Google Application Default Credentials from `VERTEX_ADC` or `~/.config/gcloud/application_default_credentials.json`
+
 ## How Credential Injection Works
 
 The agent process inside the sandbox never sees real credential values. At startup, the proxy replaces each credential with an opaque placeholder token in the agent's environment. When the agent sends an HTTP request containing a placeholder, the proxy resolves it to the real credential before forwarding upstream.
@@ -161,6 +181,7 @@ The following provider types are supported.
 | `nvidia` | `NVIDIA_API_KEY` | NVIDIA API Catalog |
 | `openai` | `OPENAI_API_KEY` | Any OpenAI-compatible endpoint. Set `--config OPENAI_BASE_URL` to point to the provider. Refer to [Configure](/inference/configure). |
 | `opencode` | `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` | opencode tool |
+| `vertex` | `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_VERTEX_REGION`, `CLAUDE_CODE_USE_VERTEX` visible to child processes; `VERTEX_ADC` and `VERTEX_ACCESS_TOKEN` stay supervisor-only | Claude Code with Google Cloud Vertex AI, or `inference.local` routed to Vertex |
 
 <Tip>
 Use the `generic` type for any service not listed above. You define the
@@ -184,6 +205,58 @@ The following providers have been tested with `inference.local`. Any provider th
 | LM Studio (local) | `lmstudio` | `openai` | `http://host.openshell.internal:1234/v1` | `OPENAI_API_KEY` |
 
 Refer to your provider's documentation for the correct base URL, available models, and API key setup. To configure inference routing, refer to [Configure](/inference/configure).
+
+## Vertex AI Workflows
+
+Two supported patterns use the same `vertex` provider type.
+
+### Direct Sandbox Use with Claude Code
+
+Create the provider from local ADC:
+
+```shell
+gcloud auth application-default login
+
+export ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+export ANTHROPIC_VERTEX_REGION=us-central1
+
+openshell provider create --name my-vertex --type vertex --from-existing
+```
+
+Attach it when you create the sandbox:
+
+```shell
+openshell sandbox create --provider my-vertex -- claude
+```
+
+Inside the sandbox, OpenShell projects `ANTHROPIC_VERTEX_PROJECT_ID`,
+`ANTHROPIC_VERTEX_REGION`, and `CLAUDE_CODE_USE_VERTEX=1` into the child
+process environment. The supervisor also creates a fake
+`~/.config/gcloud/application_default_credentials.json` file and intercepts the
+Google OAuth token exchange that Claude Code performs. The real ADC JSON and
+refreshed Vertex access token stay in supervisor memory and are not exposed to
+the sandboxed process.
+
+Allow these external endpoints in your sandbox policy when Claude Code talks to
+Vertex directly:
+
+- `oauth2.googleapis.com:443`
+- `<region>-aiplatform.googleapis.com:443`
+
+### `inference.local` Routed Through Vertex
+
+Use the same provider with the managed local endpoint when you want all sandbox
+code to call `https://inference.local` instead of reaching Vertex directly.
+
+```shell
+openshell inference set \
+    --provider my-vertex \
+    --model claude-sonnet-4@20250514
+```
+
+In this mode the gateway refreshes the Vertex bearer token, rewrites the model
+into the Vertex URL shape, and forwards Anthropic-compatible requests to the
+correct Google Cloud regional endpoint.
 
 ## Next Steps
 

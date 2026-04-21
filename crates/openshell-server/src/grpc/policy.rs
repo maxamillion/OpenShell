@@ -449,9 +449,12 @@ pub(super) async fn handle_get_sandbox_provider_environment(
         .spec
         .ok_or_else(|| Status::internal("sandbox has no spec"))?;
 
-    let environment =
-        super::provider::resolve_provider_environment(state.store.as_ref(), &spec.providers)
-            .await?;
+    let environment = super::provider::resolve_provider_environment(
+        state.store.as_ref(),
+        &state.vertex_tokens,
+        &spec.providers,
+    )
+    .await?;
 
     info!(
         sandbox_id = %sandbox_id,
