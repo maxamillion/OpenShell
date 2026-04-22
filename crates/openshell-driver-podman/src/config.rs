@@ -71,7 +71,17 @@ pub struct PodmanComputeConfig {
     /// Image pull policy for sandbox images.
     pub image_pull_policy: ImagePullPolicy,
     /// Gateway gRPC endpoint the sandbox connects back to.
+    ///
+    /// When empty, the driver auto-detects the endpoint using
+    /// `gateway_port` and `host.containers.internal`.
     pub grpc_endpoint: String,
+    /// Port the gateway server is actually listening on.
+    ///
+    /// Used by the driver's auto-detection fallback when `grpc_endpoint`
+    /// is empty.  The server must set this to `config.bind_address.port()`
+    /// so the correct port is used even when `--port` differs from the
+    /// default.  Defaults to [`openshell_core::config::DEFAULT_SERVER_PORT`].
+    pub gateway_port: u16,
     /// Unix socket path the in-container supervisor bridges relay traffic to.
     pub sandbox_ssh_socket_path: String,
     /// Name of the Podman bridge network.
@@ -119,6 +129,7 @@ impl Default for PodmanComputeConfig {
             default_image: String::new(),
             image_pull_policy: ImagePullPolicy::default(),
             grpc_endpoint: String::new(),
+            gateway_port: openshell_core::config::DEFAULT_SERVER_PORT,
             sandbox_ssh_socket_path: "/run/openshell/ssh.sock".to_string(),
             network_name: DEFAULT_NETWORK_NAME.to_string(),
             ssh_listen_addr: String::new(),
@@ -138,6 +149,7 @@ impl std::fmt::Debug for PodmanComputeConfig {
             .field("default_image", &self.default_image)
             .field("image_pull_policy", &self.image_pull_policy.as_str())
             .field("grpc_endpoint", &self.grpc_endpoint)
+            .field("gateway_port", &self.gateway_port)
             .field("sandbox_ssh_socket_path", &self.sandbox_ssh_socket_path)
             .field("network_name", &self.network_name)
             .field("ssh_listen_addr", &self.ssh_listen_addr)

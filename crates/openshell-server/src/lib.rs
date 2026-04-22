@@ -365,6 +365,7 @@ async fn build_compute_runtime(
                     default_image: config.sandbox_image.clone(),
                     image_pull_policy: config.sandbox_image_pull_policy.parse().unwrap_or_default(),
                     grpc_endpoint: config.grpc_endpoint.clone(),
+                    gateway_port: config.bind_address.port(),
                     sandbox_ssh_socket_path: config.sandbox_ssh_socket_path.clone(),
                     network_name,
                     ssh_listen_addr: format!("0.0.0.0:{}", config.sandbox_ssh_port),

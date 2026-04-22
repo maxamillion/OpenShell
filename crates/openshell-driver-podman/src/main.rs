@@ -48,6 +48,17 @@ struct Args {
     #[arg(long, env = "OPENSHELL_GRPC_ENDPOINT")]
     grpc_endpoint: Option<String>,
 
+    /// Port the gateway server is listening on.
+    ///
+    /// Used when `--grpc-endpoint` is not set to auto-detect the endpoint
+    /// that sandbox containers dial back to.
+    #[arg(
+        long,
+        env = "OPENSHELL_GATEWAY_PORT",
+        default_value_t = openshell_core::config::DEFAULT_SERVER_PORT
+    )]
+    gateway_port: u16,
+
     #[arg(
         long,
         env = "OPENSHELL_SANDBOX_SSH_SOCKET_PATH",
@@ -95,6 +106,7 @@ async fn main() -> Result<()> {
         default_image: args.sandbox_image.unwrap_or_default(),
         image_pull_policy: args.sandbox_image_pull_policy,
         grpc_endpoint: args.grpc_endpoint.unwrap_or_default(),
+        gateway_port: args.gateway_port,
         sandbox_ssh_socket_path: args.sandbox_ssh_socket_path,
         network_name: args.network_name,
         ssh_listen_addr: format!("0.0.0.0:{}", args.sandbox_ssh_port),

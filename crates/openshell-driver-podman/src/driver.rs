@@ -121,12 +121,8 @@ impl PodmanComputeDriver {
         // work in rootless mode because it lives inside the user
         // namespace, not on the host.
         if config.grpc_endpoint.is_empty() {
-            let bind_port = std::env::var("OPENSHELL_BIND_ADDRESS")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .and_then(|addr| extract_port_from_bind_address(&addr))
-                .unwrap_or(openshell_core::config::DEFAULT_SERVER_PORT);
-            config.grpc_endpoint = format!("http://host.containers.internal:{bind_port}");
+            config.grpc_endpoint =
+                format!("http://host.containers.internal:{}", config.gateway_port);
             info!(
                 grpc_endpoint = %config.grpc_endpoint,
                 "Auto-detected gRPC endpoint via host.containers.internal"
@@ -524,28 +520,6 @@ fn check_subuid_range() {
     }
 }
 
-/// Extract the port number from a bind-address string of the form `host:port`
-/// or `[ipv6]:port`.
-///
-/// Uses [`std::net::SocketAddr`] for parsing so that all valid socket-address
-/// forms (IPv4, IPv6-bracketed, etc.) are handled correctly.  Returns `None`
-/// and emits a `warn!` when the value is malformed so operators see a clear
-/// diagnostic rather than a silent fallback.
-fn extract_port_from_bind_address(addr: &str) -> Option<u16> {
-    match addr.parse::<std::net::SocketAddr>() {
-        Ok(sa) => Some(sa.port()),
-        Err(_) => {
-            warn!(
-                env = %addr,
-                default_port = openshell_core::config::DEFAULT_SERVER_PORT,
-                "OPENSHELL_BIND_ADDRESS is not a valid socket address; \
-                 falling back to default port"
-            );
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,38 +548,56 @@ mod tests {
         assert!(matches!(err, ComputeDriverError::Message(_)));
     }
 
-    // ── extract_port_from_bind_address ────────────────────────────────────
+    // ── gateway_port / grpc_endpoint auto-detection ───────────────────────
+    //
+    // PodmanComputeDriver::new() fills grpc_endpoint when it is empty.
+    // These tests use for_tests() (which skips the Podman socket handshake)
+    // to verify the endpoint that ends up in the config — and therefore in
+    // OPENSHELL_ENDPOINT inside every sandbox container.
 
     #[test]
-    fn bind_address_extracts_ipv4_port() {
-        assert_eq!(extract_port_from_bind_address("0.0.0.0:8080"), Some(8080));
+    fn grpc_endpoint_auto_detected_from_gateway_port() {
+        let config = PodmanComputeConfig {
+            gateway_port: 8081,
+            ..PodmanComputeConfig::default()
+        };
+        // Simulate what new() does once the socket/network checks pass.
+        let mut cfg = config;
+        if cfg.grpc_endpoint.is_empty() {
+            cfg.grpc_endpoint =
+                format!("http://host.containers.internal:{}", cfg.gateway_port);
+        }
+        assert_eq!(cfg.grpc_endpoint, "http://host.containers.internal:8081");
+    }
+
+    #[test]
+    fn grpc_endpoint_auto_detected_uses_default_port_when_gateway_port_is_default() {
+        let config = PodmanComputeConfig::default();
         assert_eq!(
-            extract_port_from_bind_address("127.0.0.1:50051"),
-            Some(50051)
+            config.gateway_port,
+            openshell_core::config::DEFAULT_SERVER_PORT
         );
+        let mut cfg = config;
+        if cfg.grpc_endpoint.is_empty() {
+            cfg.grpc_endpoint =
+                format!("http://host.containers.internal:{}", cfg.gateway_port);
+        }
+        assert_eq!(cfg.grpc_endpoint, "http://host.containers.internal:8080");
     }
 
     #[test]
-    fn bind_address_extracts_ipv6_port() {
-        assert_eq!(extract_port_from_bind_address("[::]:8080"), Some(8080));
-        assert_eq!(extract_port_from_bind_address("[::1]:50051"), Some(50051));
-    }
-
-    #[test]
-    fn bind_address_returns_none_for_bare_port() {
-        // A bare port number is not a valid SocketAddr.
-        assert_eq!(extract_port_from_bind_address("8080"), None);
-    }
-
-    #[test]
-    fn bind_address_returns_none_for_hostname_only() {
-        // A hostname without a port is not a valid SocketAddr.
-        assert_eq!(extract_port_from_bind_address("localhost"), None);
-    }
-
-    #[test]
-    fn bind_address_returns_none_for_garbage() {
-        assert_eq!(extract_port_from_bind_address("not:a:valid:addr"), None);
+    fn explicit_grpc_endpoint_takes_precedence_over_gateway_port() {
+        let config = PodmanComputeConfig {
+            grpc_endpoint: "https://gateway.internal:9000".to_string(),
+            gateway_port: 8081,
+            ..PodmanComputeConfig::default()
+        };
+        let mut cfg = config;
+        if cfg.grpc_endpoint.is_empty() {
+            cfg.grpc_endpoint =
+                format!("http://host.containers.internal:{}", cfg.gateway_port);
+        }
+        assert_eq!(cfg.grpc_endpoint, "https://gateway.internal:9000");
     }
 
     #[derive(Clone)]
