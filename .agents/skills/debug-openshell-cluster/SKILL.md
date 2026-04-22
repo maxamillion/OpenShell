@@ -299,7 +299,9 @@ Common issues:
 
 ### Step 9: Check DNS Resolution
 
-DNS misconfiguration is a common root cause, especially on remote/Linux hosts:
+> **Scope:** This step covers DNS for the **cluster infrastructure** (k3s, CoreDNS, image pulls). It is entirely separate from DNS enforcement for agent workloads running inside sandboxes — see the note at the end of this section.
+
+DNS misconfiguration is a common root cause of cluster startup failures, especially on remote/Linux hosts:
 
 ```bash
 # Check the resolv.conf k3s is using
@@ -315,16 +317,20 @@ Check the entrypoint's DNS decision in the container logs:
 openshell doctor logs --lines 20
 ```
 
-The entrypoint script selects DNS resolvers in this priority:
+The entrypoint script (`cluster-entrypoint.sh`) uses a single DNS strategy with one fallback:
 
-1. Viable nameservers from `/etc/resolv.conf` (not loopback/link-local)
-2. Docker `ExtServers` from `/etc/resolv.conf` comments
-3. Host gateway IP (Docker Desktop only, `192.168.*`)
-4. Fallback to `8.8.8.8` / `8.8.4.4`
+1. **Primary — Docker DNS proxy**: `setup_dns_proxy()` reads the `DOCKER_OUTPUT` iptables chain to find the ports where Docker's embedded DNS (`127.0.0.11`) is actually listening, then installs DNAT rules so k3s pods (which run in separate network namespaces and cannot reach `127.0.0.11` directly via OUTPUT rules) can reach it via the container's `eth0` IP. On success, writes `nameserver <eth0-ip>` to `/etc/rancher/k3s/resolv.conf`.
+2. **Fallback — public DNS**: If `setup_dns_proxy()` fails for any reason (chain not found, no `eth0` IP), writes `nameserver 8.8.8.8` / `nameserver 8.8.4.4` to `/etc/rancher/k3s/resolv.conf`.
 
-**Podman note:** Rootless Podman uses pasta (or slirp4netns) for network connectivity, which has different DNS behavior than Docker's built-in DNS at `127.0.0.11`. DNS resolution inside Podman containers typically inherits the host's `/etc/resolv.conf` directly. If DNS fails inside a Podman-managed cluster container, check the host's DNS configuration first.
+**Under Docker**, `setup_dns_proxy()` succeeds when the `DOCKER_OUTPUT` iptables chain exists (standard Docker custom networks). If it fails, the public DNS fallback is used and a warning is logged.
+
+**Under rootless Podman**, the `DOCKER_OUTPUT` iptables chain does not exist — Podman uses Aardvark DNS on the bridge gateway IP for custom networks, not Docker's embedded resolver. `setup_dns_proxy()` will always fail with `Warning: Could not discover Docker DNS ports from iptables` and the fallback to `8.8.8.8`/`8.8.4.4` always applies. DNS works on most Linux hosts because public DNS is reachable, but fails on networks that block external UDP port 53 (e.g. corporate firewalls or restricted VPNs). If DNS fails under Podman, verify that `8.8.8.8:53` (UDP) is reachable from the host — the container does not inherit the host's `/etc/resolv.conf`.
+
+After either path, `verify_dns()` runs an `nslookup` probe against the configured registry host (defaulting to `ghcr.io`). Failure emits a `DNS_PROBE_FAILED` marker in the logs, which the Rust-side bootstrap polling loop detects to abort early with a clear error instead of spinning for minutes.
 
 If DNS is broken, all image pulls from the distribution registry will fail, as will pods that need external network access.
+
+> **Sandbox agent DNS is a different layer entirely.** The cluster DNS described above has no effect on what agent workloads running inside sandboxes can resolve. The sandbox supervisor (`openshell-sandbox`) creates a Linux network namespace with a veth pair and installs iptables rules inside it that REJECT all outbound UDP (including port 53) except traffic to the proxy. Agent workloads cannot make raw DNS queries regardless of what nameservers are configured — DNS must go through the HTTP CONNECT proxy. This is a kernel-enforced boundary, not a configuration setting. The bypass monitor logs and REJECTs any direct DNS attempt with the hint: *"DNS queries should route through the sandbox proxy; check resolver configuration"*.
 
 ## Common Failure Patterns
 
@@ -354,7 +360,8 @@ If DNS is broken, all image pulls from the distribution registry will fail, as w
 | Architecture mismatch (remote) | Built on arm64, deploying to amd64 | Cross-build the image for the target architecture |
 | Port conflict | Another service on the configured gateway host port (default 8080) | Stop conflicting service or use `--port` on `openshell gateway start` to pick a different host port |
 | gRPC connect refused to `127.0.0.1:443` in CI | Docker daemon is remote (`DOCKER_HOST=tcp://...`) but metadata still points to loopback | Verify metadata endpoint host matches `DOCKER_HOST` and includes non-loopback host |
-| DNS failures inside container | Entrypoint DNS detection failed | `openshell doctor exec -- cat /etc/rancher/k3s/resolv.conf` and `openshell doctor logs --lines 20` |
+| DNS failures inside container (Docker) | `setup_dns_proxy()` failed to find `DOCKER_OUTPUT` iptables chain | `openshell doctor logs --lines 20` for `Warning: Could not discover Docker DNS ports`; try `docker network prune -f` and redeploy |
+| DNS failures inside container (Podman) | `setup_dns_proxy()` always fails under Podman; public DNS fallback (`8.8.8.8`) is used but unreachable | Verify `8.8.8.8:53` UDP is reachable from the host; `openshell doctor exec -- cat /etc/rancher/k3s/resolv.conf` to confirm fallback is in place |
 | Pods can't reach kube-dns / ClusterIP services | `br_netfilter` not loaded; bridge traffic bypasses iptables DNAT rules | `sudo modprobe br_netfilter` on the host, then `echo br_netfilter \| sudo tee /etc/modules-load.d/br_netfilter.conf` to persist. Known to be required on Jetson Linux 5.15-tegra; other kernels (e.g. standard x86/aarch64 Linux) may have bridge netfilter built in and work without the module. The entrypoint logs a warning when `/proc/sys/net/bridge/bridge-nf-call-iptables` is absent but does not abort — only act on it if DNS or service connectivity is actually broken. |
 | Node DiskPressure / MemoryPressure / PIDPressure | Insufficient disk, memory, or PIDs on host | Free disk (`docker system prune -a --volumes`), increase memory, or expand host resources. Bootstrap auto-detects via `HEALTHCHECK_NODE_PRESSURE` marker |
 | Pods evicted with "The node had condition: [DiskPressure]" | Host disk full, kubelet evicting pods | Free disk space on host, then `openshell gateway destroy <name> && openshell gateway start` |

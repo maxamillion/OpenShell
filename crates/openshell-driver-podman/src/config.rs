@@ -166,65 +166,34 @@ impl std::fmt::Debug for PodmanComputeConfig {
 mod tests {
     use super::*;
 
+    /// Serialises env-mutating tests so that parallel test threads cannot
+    /// observe each other's changes to `XDG_RUNTIME_DIR`.
+    static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     #[test]
     fn default_socket_path_respects_xdg_runtime_dir() {
-        // Temporarily set XDG_RUNTIME_DIR and verify it is used.
-        let _guard = TempEnvVar::set("XDG_RUNTIME_DIR", "/tmp/test-xdg");
-        let path = PodmanComputeConfig::default_socket_path();
-        assert_eq!(path, PathBuf::from("/tmp/test-xdg/podman/podman.sock"));
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        temp_env::with_vars([("XDG_RUNTIME_DIR", Some("/tmp/test-xdg"))], || {
+            let path = PodmanComputeConfig::default_socket_path();
+            assert_eq!(path, PathBuf::from("/tmp/test-xdg/podman/podman.sock"));
+        });
     }
 
     #[test]
     fn default_socket_path_falls_back_to_uid() {
-        let _guard = TempEnvVar::remove("XDG_RUNTIME_DIR");
-        let path = PodmanComputeConfig::default_socket_path();
-        let uid = nix::unistd::getuid();
-        assert_eq!(
-            path,
-            PathBuf::from(format!("/run/user/{uid}/podman/podman.sock"))
-        );
-    }
-
-    /// RAII guard that sets/removes an env var and restores it on drop.
-    ///
-    /// # Safety
-    /// These tests must not run in parallel with other tests that read
-    /// `XDG_RUNTIME_DIR`. Cargo runs test binaries with a single thread
-    /// by default for `#[test]` within the same crate, so this is safe
-    /// as long as no other thread inspects the env concurrently.
-    #[allow(unsafe_code)]
-    struct TempEnvVar {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    #[allow(unsafe_code)]
-    impl TempEnvVar {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            // SAFETY: No other thread reads this env var concurrently in
-            // these unit tests.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, original }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let original = std::env::var(key).ok();
-            // SAFETY: see above.
-            unsafe { std::env::remove_var(key) };
-            Self { key, original }
-        }
-    }
-
-    #[allow(unsafe_code)]
-    impl Drop for TempEnvVar {
-        fn drop(&mut self) {
-            match &self.original {
-                // SAFETY: restoring original value in drop; same thread safety
-                // guarantee as set/remove above.
-                Some(val) => unsafe { std::env::set_var(self.key, val) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        temp_env::with_vars([("XDG_RUNTIME_DIR", None::<&str>)], || {
+            let path = PodmanComputeConfig::default_socket_path();
+            let uid = nix::unistd::getuid();
+            assert_eq!(
+                path,
+                PathBuf::from(format!("/run/user/{uid}/podman/podman.sock"))
+            );
+        });
     }
 }

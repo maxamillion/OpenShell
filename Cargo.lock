@@ -3173,6 +3173,7 @@ dependencies = [
  "openshell-core",
  "serde",
  "serde_json",
+ "temp-env",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
