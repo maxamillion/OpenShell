@@ -126,7 +126,7 @@ graph TB
         end
     end
 
-    GW -.->|SSH via published port<br/>127.0.0.1:ephemeral| Container
+    GW -.->|SSH via supervisor relay<br/>gRPC session| SV
     SV -->|gRPC callback via<br/>host.containers.internal| GW
     SP -->|all egress via proxy| VE1
 ```
@@ -135,7 +135,7 @@ Key points:
 
 - **Bridge network**: Created by `client.ensure_network()` with DNS enabled. Containers on the bridge can see each other at L3, but sandbox processes cannot because they are isolated inside the nested netns.
 - **Nested netns**: The supervisor creates a private `NetworkNamespace` with a veth pair (10.200.0.1/24 <-> 10.200.0.2/24). Sandbox processes enter this netns via `setns(fd, CLONE_NEWNET)` in the `pre_exec` hook, forcing all traffic through the CONNECT proxy.
-- **Port publishing**: SSH uses `host_port: 0` (ephemeral port assignment). The gateway reads the assigned port from `podman inspect` and connects via `127.0.0.1:<host_port>`.
+- **Port publishing**: SSH uses `host_port: 0` (ephemeral port assignment) for health checks and debug access. The gateway SSH tunnel uses the supervisor relay (`supervisor_sessions.open_relay()`) rather than connecting directly to the published port.
 - **Host gateway**: `host.containers.internal:host-gateway` in `/etc/hosts` allows containers to reach the gateway server on the host.
 - **nsenter**: The supervisor uses `nsenter --net=` instead of `ip netns exec` for namespace operations, avoiding the sysfs remount that fails in rootless containers.
 
@@ -158,7 +158,7 @@ The SSH handshake secret is injected via Podman's `secret_env` API rather than a
 | gRPC endpoint (`OPENSHELL_ENDPOINT`) | Plaintext env var, override-protected | Yes | Yes |
 | Supervisor relay socket path (`OPENSHELL_SSH_SOCKET_PATH`) | Plaintext env var, override-protected (same value as `PodmanComputeConfig::sandbox_ssh_socket_path`) | Yes | Yes |
 
-The `build_env()` function in `container.rs` inserts user-supplied variables first, then unconditionally overwrites security-critical variables (`OPENSHELL_ENDPOINT`, `OPENSHELL_SANDBOX_ID`, `OPENSHELL_SSH_SOCKET_PATH`, `OPENSHELL_SANDBOX`, etc.) to prevent spoofing via sandbox templates.
+The `build_env()` function in `container.rs` inserts user-supplied variables first, then unconditionally overwrites all security-critical variables to prevent spoofing via sandbox templates: `OPENSHELL_SANDBOX`, `OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, `OPENSHELL_SSH_SOCKET_PATH`, `OPENSHELL_SSH_LISTEN_ADDR`, `OPENSHELL_SSH_HANDSHAKE_SKEW_SECS`, `OPENSHELL_CONTAINER_IMAGE`, `OPENSHELL_SANDBOX_COMMAND`.
 
 The `PodmanComputeConfig::Debug` impl redacts the handshake secret as `[REDACTED]`.
 
@@ -174,7 +174,7 @@ sequenceDiagram
 
     GW->>D: create_sandbox(DriverSandbox)
     D->>D: validate name + id
-    D->>D: validate_container_name()
+    D->>D: validated_container_name()
 
     D->>P: pull_image(supervisor, "missing")
     D->>P: pull_image(sandbox_image, policy)
@@ -226,7 +226,7 @@ If the container is already gone during inspect or remove, the driver still perf
 | `OPENSHELL_SSH_HANDSHAKE_SECRET` | `--ssh-handshake-secret` | (required) | Shared secret for NSSH1 handshake |
 | `OPENSHELL_SANDBOX_SSH_SOCKET_PATH` | `--sandbox-ssh-socket-path` | `/run/openshell/ssh.sock` | Standalone driver only: supervisor Unix socket path in `PodmanComputeConfig` (in-gateway Podman uses server `config.sandbox_ssh_socket_path`) |
 | `OPENSHELL_STOP_TIMEOUT` | `--stop-timeout` | `10` | Container stop timeout in seconds (SIGTERM -> SIGKILL) |
-| `OPENSHELL_SUPERVISOR_IMAGE` | `--supervisor-image` | `openshell/supervisor:latest` | OCI image containing the supervisor binary |
+| `OPENSHELL_SUPERVISOR_IMAGE` | `--supervisor-image` | `openshell/supervisor:latest` (struct default; standalone binary requires explicit value) | OCI image containing the supervisor binary |
 
 ## Rootless-Specific Adaptations
 
@@ -236,7 +236,7 @@ The Podman driver is designed for rootless operation. The following adaptations 
 
 2. **cgroups v2 requirement**: The driver refuses to start if cgroups v1 is detected. Rootless Podman requires the unified cgroup hierarchy.
 
-3. **nsenter for namespace operations**: `run_ip_netns()` and `run_iptables_netns()` in the sandbox's `netns.rs` use `nsenter --net=` instead of `ip netns exec` to avoid the sysfs remount that requires real `CAP_SYS_ADMIN` in the host user namespace.
+3. **nsenter for namespace operations**: `run_ip_netns()` and `run_iptables_netns()` in `crates/openshell-sandbox/src/sandbox/linux/netns.rs` use `nsenter --net=` instead of `ip netns exec` to avoid the sysfs remount that requires real `CAP_SYS_ADMIN` in the host user namespace.
 
 4. **DAC_READ_SEARCH capability**: Required for the proxy to read `/proc/<pid>/fd/` across UIDs within the user namespace.
 
@@ -244,7 +244,7 @@ The Podman driver is designed for rootless operation. The following adaptations 
 
 6. **host.containers.internal**: Used instead of Docker's `host.docker.internal` for container-to-host communication. Injected via `hostadd` with Podman's `host-gateway` magic value.
 
-7. **Ephemeral port publishing**: SSH port uses `host_port: 0` because the bridge network IP (10.89.x.x) is not routable from the host in rootless mode. The gateway reads the assigned host port from `podman inspect`.
+7. **Ephemeral port publishing**: SSH port uses `host_port: 0` because the bridge network IP (10.89.x.x) is not routable from the host in rootless mode. The published port is used for health checks and debug access; the gateway SSH tunnel uses the supervisor relay.
 
 8. **tmpfs at `/run/netns`**: A private tmpfs is mounted so the supervisor can create named network namespaces via `ip netns add`, which requires `/run/netns` to exist and be writable.
 
@@ -253,7 +253,7 @@ The Podman driver is designed for rootless operation. The following adaptations 
 - Gateway integration: `crates/openshell-server/src/compute/mod.rs` (`new_podman` and `PodmanComputeDriver` wiring)
 - Server configuration: `crates/openshell-server/src/lib.rs` (`ComputeDriverKind::Podman` — builds `PodmanComputeConfig` including `sandbox_ssh_socket_path` from gateway `Config`)
 - Gateway relay path: `openshell-core` `Config::sandbox_ssh_socket_path` in `crates/openshell-core/src/config.rs`
-- SSRF mitigation: `crates/openshell-server/src/ssh_tunnel.rs` (lines 103-189, loopback/link-local checks)
+- SSRF mitigation: `crates/openshell-core/src/net.rs` (IP classification: `is_always_blocked_ip`, `is_internal_ip`), `crates/openshell-sandbox/src/proxy.rs` (runtime enforcement on CONNECT/forward proxy), `crates/openshell-server/src/grpc/policy.rs` (load-time validation via `validate_rule_not_always_blocked`)
 - Sandbox supervisor: `crates/openshell-sandbox/src/` (Landlock, seccomp, netns, proxy -- shared by all drivers)
 - Container engine abstraction: `tasks/scripts/container-engine.sh` (build/deploy support for Docker and Podman)
-- Supervisor image build: `deploy/docker/Dockerfile.images` (lines 182-183, `supervisor-output` target)
+- Supervisor image build: `deploy/docker/Dockerfile.images` (lines 183-184, `supervisor-output` target)
