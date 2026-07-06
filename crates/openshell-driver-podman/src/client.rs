@@ -245,6 +245,8 @@ pub struct HostInfo {
     #[serde(default)]
     pub network_backend: String,
     #[serde(default)]
+    pub rootless_network_cmd: String,
+    #[serde(default)]
     pub security: SecurityInfo,
 }
 

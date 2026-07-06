@@ -201,6 +201,13 @@ impl ServerState {
     }
 }
 
+fn gateway_callback_client_cert_auth_enabled(config: &Config) -> bool {
+    config
+        .tls
+        .as_ref()
+        .is_some_and(|tls| tls.require_client_auth)
+}
+
 /// Run the `OpenShell` server.
 ///
 /// This starts a multiplexed gRPC/HTTP server on the configured bind address.
@@ -250,7 +257,11 @@ pub(crate) async fn run_server(
         file: config_file.as_ref(),
         guest_tls: guest_tls.as_ref(),
         gateway_port: config.bind_address.port(),
+        gateway_bind_address: config.bind_address,
         gateway_tls_enabled: config.tls.is_some(),
+        gateway_callback_client_cert_auth_enabled: gateway_callback_client_cert_auth_enabled(
+            &config,
+        ),
         endpoint_overrides: &config.compute_driver_endpoints,
     };
     let compute = build_compute_runtime(
@@ -900,8 +911,9 @@ mod tests {
     use super::{
         ConfiguredComputeDriver, ConnectionProtocol, MultiplexService, ServerState, TlsAcceptor,
         allow_plaintext_service_http, classify_initial_bytes, configured_compute_driver,
-        gateway_listener_addresses, is_benign_tls_handshake_failure,
-        kubernetes_sandbox_jwt_expiry_disabled, serve_gateway_listener,
+        gateway_callback_client_cert_auth_enabled, gateway_listener_addresses,
+        is_benign_tls_handshake_failure, kubernetes_sandbox_jwt_expiry_disabled,
+        serve_gateway_listener,
     };
     use openshell_core::{
         ComputeDriverKind, Config,
@@ -926,7 +938,10 @@ mod tests {
             file,
             guest_tls: None,
             gateway_port: openshell_core::config::DEFAULT_SERVER_PORT,
+            gateway_bind_address: ([127, 0, 0, 1], openshell_core::config::DEFAULT_SERVER_PORT)
+                .into(),
             gateway_tls_enabled: false,
+            gateway_callback_client_cert_auth_enabled: false,
             endpoint_overrides: &config.compute_driver_endpoints,
         }
     }
@@ -1369,6 +1384,65 @@ mod tests {
             &config_with_jwt_ttl(3600)
         ));
         assert!(!kubernetes_sandbox_jwt_expiry_disabled(&Config::new(None)));
+    }
+
+    fn tls_config(require_client_auth: bool) -> openshell_core::TlsConfig {
+        openshell_core::TlsConfig {
+            cert_path: "/tmp/server.crt".into(),
+            key_path: "/tmp/server.key".into(),
+            client_ca_path: Some("/tmp/ca.crt".into()),
+            require_client_auth,
+        }
+    }
+
+    #[test]
+    fn gateway_callback_client_cert_auth_ignores_gateway_jwt_only() {
+        let mut config = Config::new(Some(tls_config(false)));
+        config.gateway_jwt = Some(openshell_core::GatewayJwtConfig {
+            signing_key_path: "/tmp/signing.pem".into(),
+            public_key_path: "/tmp/public.pem".into(),
+            kid_path: "/tmp/kid".into(),
+            gateway_id: "openshell".to_string(),
+            ttl_secs: 3600,
+        });
+
+        assert!(!gateway_callback_client_cert_auth_enabled(&config));
+    }
+
+    #[test]
+    fn gateway_callback_client_cert_auth_ignores_oidc_only() {
+        let config = Config::new(Some(tls_config(false))).with_oidc(openshell_core::OidcConfig {
+            issuer: "https://issuer.example".to_string(),
+            audience: "openshell".to_string(),
+            jwks_ttl_secs: 3600,
+            roles_claim: "roles".to_string(),
+            admin_role: "openshell-admin".to_string(),
+            user_role: "openshell-user".to_string(),
+            scopes_claim: String::new(),
+        });
+
+        assert!(!gateway_callback_client_cert_auth_enabled(&config));
+    }
+
+    #[test]
+    fn gateway_callback_client_cert_auth_rejects_missing_tls() {
+        assert!(!gateway_callback_client_cert_auth_enabled(&Config::new(
+            None
+        )));
+    }
+
+    #[test]
+    fn gateway_callback_client_cert_auth_rejects_tls_without_required_client_auth() {
+        assert!(!gateway_callback_client_cert_auth_enabled(&Config::new(
+            Some(tls_config(false),)
+        )));
+    }
+
+    #[test]
+    fn gateway_callback_client_cert_auth_accepts_required_tls_client_auth() {
+        assert!(gateway_callback_client_cert_auth_enabled(&Config::new(
+            Some(tls_config(true),)
+        )));
     }
 
     #[test]
